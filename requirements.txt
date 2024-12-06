@@ -1,0 +1,5 @@
+pandas
+stable-baselines3
+gensim
+notebook
+nltk
