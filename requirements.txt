@@ -3,3 +3,4 @@ stable-baselines3
 gensim
 notebook
 nltk
+ucimlrepo
