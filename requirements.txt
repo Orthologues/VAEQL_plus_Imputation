@@ -1,3 +1,5 @@
+scikit-learn
+pyampute
 pandas
 stable-baselines3
 gensim
