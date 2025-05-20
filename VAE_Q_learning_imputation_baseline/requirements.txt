@@ -1,0 +1,8 @@
+scikit-learn
+pyampute
+pandas==1.5.3
+stable-baselines3
+gensim
+notebook
+nltk
+ucimlrepo
