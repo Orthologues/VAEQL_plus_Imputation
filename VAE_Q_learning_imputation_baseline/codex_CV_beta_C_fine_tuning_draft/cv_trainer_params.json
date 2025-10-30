@@ -1,0 +1,20 @@
+{
+  "beta_grid": [0.5, 1, 2, 4],
+  "C_grid": [0, 5, 10],
+  "k_folds": 5,
+  "learning_rate": 1e-3,
+  "batch_size": 256,
+  "recycles": 6,
+  "m": 10,
+  "results_path": "beta_analysis.csv",
+  "data_path": "path/to/complete.csv",
+  "corrupt_data_path": "path/to/masked.csv",
+  "initial_imputation_strategy": "zero",
+  "latent_size": 16,
+  "hidden_size_1": 128,
+  "hidden_size_2": 64,
+  "epoch_granularity": {"default": 30, "4": 25},
+  "max_epochs_map": {"default": 300, "4": 400},
+  "model_outdir": "./trained_models"
+}
+
