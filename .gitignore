@@ -2,3 +2,4 @@
 .ipynb_checkpoints/
 Synthea_*/
 Awan_2022_*mputed_datasets/
+*.lock
