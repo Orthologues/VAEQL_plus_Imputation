@@ -11,6 +11,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import KFold
 
+from pythae.models import DisentangledBetaVAE, DisentangledBetaVAEConfig
+
+
+# ---- Documentations of crucial import  
+
+#
+
 # ---- imports assumed from your PyTorch util module ----
 # from disentangledBetaVaeUtil import (
 #     get_scaled_data,
@@ -26,7 +33,7 @@ from sklearn.model_selection import KFold
 # 1. Model wrapper / loss
 #########################################################
 
-class DisentangledBetaVAE(nn.Module):
+class DisentangledBetaVaeTorchModule(nn.Module):
     """
     Minimal placeholder.
     You must replace encoder/decoder architectures with yours.
@@ -487,7 +494,7 @@ def main():
     h1 = config["hidden_size_1"]
     h2 = config["hidden_size_2"]
 
-    vae = DisentangledBetaVAE(
+    vae = DisentangledBetaVaeTorchModule(
         input_dim=input_dim,
         latent_dim=latent_dim,
         hidden_dim1=h1,
