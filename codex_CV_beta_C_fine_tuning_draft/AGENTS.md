@@ -1,3 +1,7 @@
+# Extra Human-made comments
+## Comments from Prof. Richard Roettger:
+- To avoid the combinatorial explosion problem of tuning $\beta$ and the capacity constant $C$, I would need to do a coarse halving grid search is a faster version of a standard grid search that uses a successive halving strategy to tune hyperparameters.   
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
