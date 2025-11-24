@@ -29,5 +29,5 @@ pip install -r requirements.txt
 
 ### conda 
 ```bash
-conda env create -f ml_env.yml --quiet
+conda clean --all -y && conda env create -f ml_env.yml 
 ```
