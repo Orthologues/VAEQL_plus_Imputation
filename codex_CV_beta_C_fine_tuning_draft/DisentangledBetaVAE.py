@@ -12,8 +12,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import KFold
 
-from pythae.models import DisentangledBetaVAE, DisentangledBetaVAEConfig
-
 
 # ---- Documentations of crucial import  
 

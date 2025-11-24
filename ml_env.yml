@@ -1,0 +1,25 @@
+name: ml_env
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip                # <-- REQUIRED to avoid Conda warning
+  - numpy
+  - pandas
+  - scikit-learn
+  - gensim
+  - notebook
+  - nltk
+  - pytest
+  - pytorch
+  - torchvision
+  - torchaudio
+
+  - pip:
+      - pyampute
+      - stable-baselines3
+      - ucimlrepo

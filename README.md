@@ -20,3 +20,14 @@ PyTorch implementation: <a>https://github.com/dhanajitb/GAIN-Pytorch</a>
 ### <i>RL-based MDP Imputation</i> algorithm
 There is no source code for this one unfortunately. <br/>
 Link to the paper with pseudo code: <a>https://link.springer.com/article/10.1007/s00521-022-06958-3</a>
+
+## Installation of env libraries
+### pip
+```bash
+pip install -r requirements.txt
+```
+
+### conda 
+```bash
+conda env create -f ml_env.yml --quiet
+```
