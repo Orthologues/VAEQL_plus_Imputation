@@ -1,0 +1,23 @@
+name: ml_env_gpu
+channels:
+  - pytorch
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scikit-learn
+  - pytorch
+  - torchvision
+  - torchaudio
+
+  - pip:
+      - gensim
+      - notebook
+      - nltk
+      - pytest
+      - pyampute
+      - stable-baselines3
+      - ucimlrepo
