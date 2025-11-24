@@ -2,9 +2,10 @@ import os
 import time
 import json
 import argparse
+import math
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -409,13 +410,154 @@ def train_one_fold(
 
 
 #########################################################
-# 4. Main cross-validation driver
+# 4. Successive halving search utilities
+#########################################################
+
+def _linspace_range(values: List[float], points: int) -> List[float]:
+    lo, hi = values
+    if points <= 1:
+        return [float(lo)]
+    return np.linspace(lo, hi, points).tolist()
+
+
+def _select_metric(results: Dict, metric: str) -> float:
+    """
+    Lower is better. Falls back to multi_mae / average_variance if needed.
+    """
+    primary = results.get(metric)
+    if primary is not None:
+        return primary
+    for fallback in ("multi_mae", "average_variance"):
+        if results.get(fallback) is not None:
+            return results[fallback]
+    return math.inf
+
+
+def successive_halving_search(
+    beta_vals: List[float],
+    C_vals: List[float],
+    budgets: List[int],
+    keep_ratio: float,
+    metric: str,
+    train_tensor: torch.Tensor,
+    validation_w_nan_np: np.ndarray,
+    validation_complete_np: np.ndarray,
+    val_na_ind,
+    scaler,
+    recycles: int,
+    m_multi: int,
+    device: torch.device,
+    latent_dim: int,
+    h1: int,
+    h2: int,
+    lr: float,
+    batch_size: int,
+    results_path: str,
+    fold_idx: int
+):
+    """
+    Perform a coarse successive-halving search over (beta, C).
+    Each candidate trains up to each `budget` (epochs) cumulatively;
+    the worst-performing half is dropped each round.
+    """
+    candidates = [
+        {
+            "beta": b,
+            "C": c,
+            "model": None,
+            "optimizer": None,
+            "trained_epochs": 0,
+            "score": math.inf,
+        }
+        for b in beta_vals
+        for c in C_vals
+    ]
+
+    def init_state(candidate):
+        model = DisentangledBetaVaeTorchModule(
+            input_dim=train_tensor.shape[1],
+            latent_dim=latent_dim,
+            hidden_dim1=h1,
+            hidden_dim2=h2
+        ).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        candidate["model"] = model
+        candidate["optimizer"] = opt
+        candidate["trained_epochs"] = 0
+
+    for budget in budgets:
+        if budget <= 0:
+            continue
+
+        print(f"[Halving] Starting budget {budget} with {len(candidates)} candidates")
+
+        for cand in candidates:
+            if cand["model"] is None:
+                init_state(cand)
+
+            extra_epochs = budget - cand["trained_epochs"]
+            if extra_epochs > 0:
+                train_one_fold(
+                    model=cand["model"],
+                    optimizer=cand["optimizer"],
+                    train_tensor=train_tensor,
+                    epochs=extra_epochs,
+                    beta=cand["beta"],
+                    Cval=cand["C"],
+                    device=device,
+                    batch_size=batch_size
+                )
+                cand["trained_epochs"] = budget
+
+            results_eval = evaluate_model(
+                model=cand["model"],
+                missing_w_nans_np=np.copy(validation_w_nan_np),
+                missing_complete_np=validation_complete_np,
+                na_ind=val_na_ind,
+                scaler=scaler,
+                recycles=recycles,
+                m=m_multi
+            )
+            results_eval["k"] = fold_idx
+            cand["score"] = _select_metric(results_eval, metric)
+
+            save_results(
+                results_eval,
+                epoch=budget,
+                beta=cand["beta"],
+                Cval=cand["C"],
+                results_path=results_path,
+                lock_path='lock.txt'
+            )
+
+        # rank and trim
+        candidates = sorted(candidates, key=lambda x: x["score"])
+        keep_count = max(1, int(math.ceil(len(candidates) * keep_ratio)))
+
+        # free dropped models
+        for drop in candidates[keep_count:]:
+            drop["model"] = None
+            drop["optimizer"] = None
+
+        candidates = candidates[:keep_count]
+        print(f"[Halving] Budget {budget} done; keeping {len(candidates)} candidates")
+
+        if len(candidates) == 1:
+            break
+
+    best = sorted(candidates, key=lambda x: x["score"])[0]
+    print(f"[Halving] Best beta={best['beta']} C={best['C']} score={best['score']}")
+    return best
+
+
+#########################################################
+# 5. Main cross-validation driver
 #########################################################
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('d_index', type=int,
-                        help='global job index: picks beta/C and fold')
+                        help='global job index: selects fold (and beta/C when not using halving)')
     parser.add_argument('--config', type=str,
                         default='cross_validation/cv_config.json',
                         help='path to configuration json')
@@ -428,10 +570,21 @@ def main():
 
     # ------------------------------------------------------------------
     # hyperparams grid (like beta_rates and epoch_granularity before)
-    # you can extend this with multiple C values
+    # can be defined as ranges (for halving) or explicit lists.
     # ------------------------------------------------------------------
-    beta_grid = config.get("beta_grid", [0.5, 1.0, 2.0, 4.0, 8.0])
-    C_grid    = config.get("C_grid",   [0.0, 5.0, 10.0])
+    use_halving = "beta_range" in config and "C_range" in config
+    if use_halving:
+        beta_grid = _linspace_range(
+            config["beta_range"],
+            config.get("beta_grid_points", 6)
+        )
+        C_grid = _linspace_range(
+            config["C_range"],
+            config.get("C_grid_points", 6)
+        )
+    else:
+        beta_grid = config.get("beta_grid", [0.5, 1.0, 2.0, 4.0, 8.0])
+        C_grid    = config.get("C_grid",   [0.0, 5.0, 10.0])
 
     # training schedule assumptions
     epoch_granularity = config.get("epoch_granularity", { "default": 30 })
@@ -454,25 +607,11 @@ def main():
         nextflow=False
     )
 
-    # figure out which beta, C, and fold this run uses
-    num_combo = len(beta_grid) * len(C_grid)
-    beta_idx = (d_index // k_folds) % len(beta_grid)
-    C_idx    = (d_index // (k_folds * len(beta_grid))) % len(C_grid)
     fold_idx = d_index % k_folds
 
-    beta_val = beta_grid[beta_idx]
-    Cval     = C_grid[C_idx]
-
     # pick epoch granularity & max epochs for this beta (fallback "default")
-    epochs_chunk = epoch_granularity.get(str(beta_val),
-                     epoch_granularity.get("default", 30))
-    final_epochs = max_epochs_map.get(str(beta_val),
-                     max_epochs_map.get("default", 300))
-
-    rounds = int(final_epochs / epochs_chunk) + 1
-
-    print(f"[INFO] beta={beta_val}, C={Cval}, fold={fold_idx}, "
-          f"epochs_chunk={epochs_chunk}, rounds={rounds}, final_epochs={final_epochs}")
+    default_chunk = epoch_granularity.get("default", 30)
+    default_final = max_epochs_map.get("default", 300)
 
     # prepare fold data
     (
@@ -494,63 +633,107 @@ def main():
     h1 = config["hidden_size_1"]
     h2 = config["hidden_size_2"]
 
-    vae = DisentangledBetaVaeTorchModule(
-        input_dim=input_dim,
-        latent_dim=latent_dim,
-        hidden_dim1=h1,
-        hidden_dim2=h2
-    ).to(device)
+    train_tensor = torch.tensor(training_input_np, dtype=torch.float32)
 
-    optimizer = torch.optim.Adam(vae.parameters(), lr=lr)
-
-    # training loop in "rounds" like your TF version
-    for r in range(rounds):
-        train_tensor = torch.tensor(training_input_np, dtype=torch.float32)
-
-        last_total, last_recon, last_kl = train_one_fold(
-            model=vae,
-            optimizer=optimizer,
-            train_tensor=train_tensor,
-            epochs=epochs_chunk,
-            beta=beta_val,
-            Cval=Cval,
-            device=device,
-            batch_size=batch_size
+    if use_halving:
+        halving_budgets = config.get(
+            "halving_epoch_budgets",
+            [default_chunk, default_chunk * 2, default_final]
         )
+        halving_budgets = sorted(set(int(b) for b in halving_budgets if b > 0))
+        halving_keep_ratio = config.get("halving_keep_ratio", 0.5)
+        halving_metric = config.get("halving_metric", "mae")
 
-        completed_epochs = (r + 1) * epochs_chunk
-        print(f"[Fold {fold_idx}] after {completed_epochs} epochs "
-              f"loss={last_total:.4f} recon={last_recon:.4f} kl={last_kl:.4f}")
-
-        # validation-style evaluation on masked validation fold
-        results_eval = evaluate_model(
-            model=vae,
-            missing_w_nans_np=np.copy(validation_w_nan_np),
-            missing_complete_np=validation_complete_np,
-            na_ind=val_na_ind,
+        best_candidate = successive_halving_search(
+            beta_vals=beta_grid,
+            C_vals=C_grid,
+            budgets=halving_budgets,
+            keep_ratio=halving_keep_ratio,
+            metric=halving_metric,
+            train_tensor=train_tensor,
+            validation_w_nan_np=validation_w_nan_np,
+            validation_complete_np=validation_complete_np,
+            val_na_ind=val_na_ind,
             scaler=scaler,
             recycles=recycles,
-            m=m_multi
-        )
-
-        # book-keeping
-        results_eval["k"] = fold_idx
-
-        save_results(
-            results_eval,
-            epoch=completed_epochs,
-            beta=beta_val,
-            Cval=Cval,
+            m_multi=m_multi,
+            device=device,
+            latent_dim=latent_dim,
+            h1=h1,
+            h2=h2,
+            lr=lr,
+            batch_size=batch_size,
             results_path=results_path,
-            lock_path='lock.txt'
+            fold_idx=fold_idx
         )
+
+        vae = best_candidate["model"]
+        beta_val = best_candidate["beta"]
+        Cval = best_candidate["C"]
+        completed_epochs = best_candidate["trained_epochs"]
+    else:
+        beta_val = beta_grid[(d_index // k_folds) % len(beta_grid)]
+        Cval = C_grid[(d_index // (k_folds * len(beta_grid))) % len(C_grid)]
+
+        epochs_chunk = epoch_granularity.get(str(beta_val),
+                         epoch_granularity.get("default", 30))
+        final_epochs = max_epochs_map.get(str(beta_val),
+                         max_epochs_map.get("default", 300))
+        rounds = int(final_epochs / epochs_chunk) + 1
+
+        print(f"[INFO] beta={beta_val}, C={Cval}, fold={fold_idx}, "
+              f"epochs_chunk={epochs_chunk}, rounds={rounds}, final_epochs={final_epochs}")
+
+        vae = DisentangledBetaVaeTorchModule(
+            input_dim=input_dim,
+            latent_dim=latent_dim,
+            hidden_dim1=h1,
+            hidden_dim2=h2
+        ).to(device)
+        optimizer = torch.optim.Adam(vae.parameters(), lr=lr)
+
+        for r in range(rounds):
+            last_total, last_recon, last_kl = train_one_fold(
+                model=vae,
+                optimizer=optimizer,
+                train_tensor=train_tensor,
+                epochs=epochs_chunk,
+                beta=beta_val,
+                Cval=Cval,
+                device=device,
+                batch_size=batch_size
+            )
+
+            completed_epochs = (r + 1) * epochs_chunk
+            print(f"[Fold {fold_idx}] after {completed_epochs} epochs "
+                  f"loss={last_total:.4f} recon={last_recon:.4f} kl={last_kl:.4f}")
+
+            results_eval = evaluate_model(
+                model=vae,
+                missing_w_nans_np=np.copy(validation_w_nan_np),
+                missing_complete_np=validation_complete_np,
+                na_ind=val_na_ind,
+                scaler=scaler,
+                recycles=recycles,
+                m=m_multi
+            )
+            results_eval["k"] = fold_idx
+
+            save_results(
+                results_eval,
+                epoch=completed_epochs,
+                beta=beta_val,
+                Cval=Cval,
+                results_path=results_path,
+                lock_path='lock.txt'
+            )
 
     # optional: save final model weights for that (beta, C, fold)
     outdir = config.get("model_outdir", "./trained_models")
     os.makedirs(outdir, exist_ok=True)
     torch.save(
         {
-            "state_dict": vae.state_dict(),
+            "state_dict": vae.state_dict() if vae is not None else None,
             "beta": beta_val,
             "C": Cval,
             "fold": fold_idx,
@@ -563,4 +746,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

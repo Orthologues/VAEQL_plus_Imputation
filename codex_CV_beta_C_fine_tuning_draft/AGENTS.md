@@ -7,7 +7,7 @@
 ## Project Structure & Module Organization
 - `DisentangledBetaVAE.py` hosts the PyTorch beta-VAE model, CLI, and cross-validation driver.
 - `disentanbledBetaVaeUtil.py` (name preserved for compatibility) contains scaling, masking, and coverage utilities.
-- `cv_trainer_params.json` stores beta/C grids, data paths, scheduler hints; copy it before editing.
+- `cv_trainer_params.json` stores beta/C ranges, data paths, scheduler hints; copy it before editing.
 - Long-running jobs emit `beta_analysis.csv`, `lock.txt`, and `trained_models/`; keep large artifacts out of git.
 
 ## Build, Test, and Development Commands
@@ -36,3 +36,4 @@
 - Replace placeholder paths in `cv_trainer_params.json` with secure locations; never commit raw datasets.
 - Version alternative configs with suffixes like `cv_params_local.json` instead of editing the shared default.
 - After crashes, delete stray `lock.txt` and prune old checkpoints once archived elsewhere.
+- Hyperparam search now supports successive halving over beta/C ranges: set `beta_range`, `C_range`, grid point counts, and `halving_epoch_budgets` in `cv_trainer_params.json`. Omit the ranges to fall back to the legacy fixed grids.
