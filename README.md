@@ -1,4 +1,4 @@
-# Fed_RL_Imputation
+# Disentangled_BetaVAE_Imputation
 Sub-project during my PhD journey at SDU
 
 ## Documentations of the necessary and potentially useful libraries 
