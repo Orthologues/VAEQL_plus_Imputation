@@ -1,3 +1,10 @@
+"""
+Disentangled Beta-VAE PyTorch implementation (torch port)
+
+Author: Jiawei Zhao (jiz@imada.sdu.dk)
+Date: 2025-11-27
+"""
+
 import os
 import time
 import json
