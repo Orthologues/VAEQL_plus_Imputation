@@ -12,7 +12,7 @@ Updated LaTeX algorithm block reflecting the current cross-validation driver and
   $\mathcal{B},\mathcal{C}$ \Comment{either explicit grids or linspace from $\beta_{\text{range}}, C_{\text{range}}$} \\
   $\text{epoch\_granularity}(\beta)$, $\text{max\_epochs}(\beta)$ \Comment{per-$\beta$ chunk + cap} \\
   $\eta$ (Adam LR), $B$ (batch size), $R$ (recycle count), $M$ (multiple imputations) \\
-  $\text{budgets}$ \Comment{halving_epoch_budgets if using successive halving} \\
+  $\text{budgets}$ \Comment{halving\_epoch\_budgets if using successive halving} \\
   $\kappa$ \Comment{halving keep ratio} \\
   $\mathfrak{m}$ \Comment{halving metric (e.g., MAE)} \\
   \end{tabular}
