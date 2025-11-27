@@ -95,22 +95,80 @@ class DisentangledBetaVaeTorchModule(nn.Module):
     # ---------- these two must be implemented for MI ----------
     def impute_single(self, X_nan_np, X_complete_np, n_recycles: int, loss: str, scaler, return_losses: bool):
         """
-        TODO: implement your actual imputation loop.
-        For now we'll just fill NaNs with the model’s forward pass mean.
-        Must return (imputed, conv_loglik?, losses_per_iter?)
+        Single-imputation pass driven by the current model.
+        Missing entries are iteratively replaced with decoder predictions; MAE is
+        tracked on the masked cells (inverse-transformed when a scaler is given).
         """
-        # dummy passthrough
+        device = next(self.parameters()).device
+        missing_mask = np.isnan(X_nan_np)
+        has_missing = bool(missing_mask.any())
+
         imputed = np.copy(X_nan_np)
-        losses_hist = [0.0]
+        # simple start: column means from the complete data, fallback to zeros
+        if has_missing:
+            col_means = np.nanmean(X_complete_np, axis=0)
+            col_means = np.where(np.isnan(col_means), 0.0, col_means)
+            imputed[missing_mask] = col_means[np.where(missing_mask)[1]]
+
+        losses_hist: List[float] = []
+        was_training = self.training
+        self.eval()
+        try:
+            steps = max(1, n_recycles)
+            for _ in range(steps):
+                x_tensor = torch.tensor(imputed, dtype=torch.float32, device=device)
+                with torch.no_grad():
+                    out = self.forward(x_tensor)
+                    recon = torch.sigmoid(out["recon_logits"]).cpu().numpy()
+                # keep observed entries fixed, refresh missing with reconstructions
+                if has_missing:
+                    imputed[missing_mask] = recon[missing_mask]
+
+                if return_losses:
+                    if not has_missing:
+                        losses_hist.append(0.0)
+                    elif scaler is not None:
+                        pred_orig = scaler.inverse_transform(imputed)
+                        truth_orig = scaler.inverse_transform(X_complete_np)
+                        mae = float(np.mean(np.abs(pred_orig[missing_mask] - truth_orig[missing_mask])))
+                        losses_hist.append(mae)
+                    else:
+                        mae = float(np.mean(np.abs(imputed[missing_mask] - X_complete_np[missing_mask])))
+                        losses_hist.append(mae)
+        finally:
+            self.train(was_training)
+
         return imputed, None, losses_hist
 
     def impute_multiple(self, X_nan_np, max_iter: int, method="Metropolis-within-Gibbs"):
         """
-        TODO: draw multiple imputations stochastically from your latent sampler.
-        Return (imputed_samples, conv_loglik?)
+        Produce one stochastic imputation by repeatedly sampling through the VAE
+        and replacing missing entries with the decoder outputs.
         """
-        # dummy: return deterministic single imputation
+        device = next(self.parameters()).device
+        missing_mask = np.isnan(X_nan_np)
         imputed = np.copy(X_nan_np)
+
+        if missing_mask.any():
+            # initialize with per-column means from observed values
+            col_means = np.nanmean(X_nan_np, axis=0)
+            col_means = np.where(np.isnan(col_means), 0.0, col_means)
+            imputed[missing_mask] = col_means[np.where(missing_mask)[1]]
+
+        was_training = self.training
+        self.eval()
+        try:
+            steps = max(1, max_iter)
+            for _ in range(steps):
+                x_tensor = torch.tensor(imputed, dtype=torch.float32, device=device)
+                with torch.no_grad():
+                    out = self.forward(x_tensor)
+                    recon = torch.sigmoid(out["recon_logits"]).cpu().numpy()
+                if missing_mask.any():
+                    imputed[missing_mask] = recon[missing_mask]
+        finally:
+            self.train(was_training)
+
         return imputed, None
 
 
