@@ -7,13 +7,14 @@ Updated LaTeX algorithm block reflecting the current cross-validation driver and
   \Require{ \
   \begin{tabular}[t]{@{}l@{}}
   \bfseries Input/config: \\
-  $X_{\mathrm{full}}, X_{\mathrm{miss}}$ from CSV paths \Comment{via \textsc{GetScaledData}, returns scaled arrays + scaler $\mathcal{S}$ with NaNs restored in $X_{\mathrm{miss}}$} \\
+  $X_{\mathrm{full}}, X_{\mathrm{miss}}$ from CSV paths \\ \Comment{via \textsc{GetScaledData}, returns scaled arrays + scaler $\mathcal{S}$ with NaNs restored in $X_{\mathrm{miss}}$} \\
   $K$ \Comment{fold count} \\
   $\mathcal{B},\mathcal{C}$ \Comment{either explicit grids or linspace from $\beta_{\text{range}}, C_{\text{range}}$} \\
   $\text{epoch\_granularity}(\beta)$, $\text{max\_epochs}(\beta)$ \Comment{per-$\beta$ chunk + cap} \\
   $\eta$ (Adam LR), $B$ (batch size), $R$ (recycle count), $M$ (multiple imputations) \\
   $\text{budgets}$ \Comment{halving_epoch_budgets if using successive halving} \\
-  $\kappa$ \Comment{halving keep ratio}, $\mathfrak{m}$ \Comment{halving metric (e.g., MAE)} \\
+  $\kappa$ \Comment{halving keep ratio} \\
+  $\mathfrak{m}$ \Comment{halving metric (e.g., MAE)} \\
   \end{tabular}
   }
   \Statex
