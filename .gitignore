@@ -3,4 +3,5 @@
 Synthea_*/
 Awan_2022_*mputed_datasets/
 *.lock
-prompts/
+prompts/*
+!prompts/output_non_ignored/
