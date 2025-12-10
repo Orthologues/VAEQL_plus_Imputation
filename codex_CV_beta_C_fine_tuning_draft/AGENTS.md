@@ -36,4 +36,4 @@
 - Replace placeholder paths in `cv_trainer_params.json` with secure locations; never commit raw datasets.
 - Version alternative configs with suffixes like `cv_params_local.json` instead of editing the shared default.
 - After crashes, delete stray `lock.txt` and prune old checkpoints once archived elsewhere.
-- Hyperparam search now supports successive halving over beta/C ranges: set `beta_range`, `C_range`, grid point counts, and `halving_epoch_budgets` in `cv_trainer_params.json`. Omit the ranges to fall back to the legacy fixed grids.
+- Hyperparam search now uses a 2D corner-halving loop: set `beta_range`, `C_range`, and `accuracy` to shrink ranges until the span is small enough, scoring with `halving_metric` and early-stopping via `convergence_tolerance`/`convergence_patience` (optional `min_epochs_before_convergence`). Per-beta epoch chunks/finals come from `epoch_granularity` and `max_epochs_map`. Omit the ranges to fall back to the legacy fixed `beta_grid`/`C_grid` selection.

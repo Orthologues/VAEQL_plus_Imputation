@@ -13,11 +13,19 @@ import math
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, List
+from multiprocessing import Pool, cpu_count
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import KFold
+
+from disentanbledBetaVaeUtil import (
+    get_scaled_data,
+    evaluate_coverage,
+    evaluate_coverage_quantile,
+    DataMissingMaker
+)
 
 
 # ---- Documentations of crucial import  
@@ -473,14 +481,100 @@ def train_one_fold(
 
 
 #########################################################
-# 4. Successive halving search utilities
+# 4. Optimizer / convergence helpers
 #########################################################
 
-def _linspace_range(values: List[float], points: int) -> List[float]:
-    lo, hi = values
-    if points <= 1:
-        return [float(lo)]
-    return np.linspace(lo, hi, points).tolist()
+
+def build_optimizer(model: nn.Module, lr: float, use_adam: bool) -> torch.optim.Optimizer:
+    """
+    Select optimizer based on config flag.
+    """
+    if use_adam:
+        return torch.optim.Adam(model.parameters(), lr=lr)
+    return torch.optim.SGD(model.parameters(), lr=lr)
+
+
+def train_fold_with_eval(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    train_tensor: torch.Tensor,
+    beta: float,
+    Cval: float,
+    device: torch.device,
+    batch_size: int,
+    epoch_chunk: int,
+    final_epochs: int,
+    metric: str,
+    validation_w_nan_np: np.ndarray,
+    validation_complete_np: np.ndarray,
+    val_na_ind,
+    scaler,
+    recycles: int,
+    m_multi: int,
+    fold_idx: int,
+    results_path: str,
+    tolerance: float,
+    patience: int,
+    min_epochs: int,
+    lock_path: str = "lock.txt"
+) -> Tuple[float, int]:
+    """
+    Train one fold with periodic evaluation and simple convergence check.
+    Returns (best_metric, epochs_ran).
+    """
+    best_metric = math.inf
+    no_improve = 0
+    completed_epochs = 0
+
+    while completed_epochs < final_epochs:
+        train_one_fold(
+            model=model,
+            optimizer=optimizer,
+            train_tensor=train_tensor,
+            epochs=epoch_chunk,
+            beta=beta,
+            Cval=Cval,
+            device=device,
+            batch_size=batch_size
+        )
+        completed_epochs += epoch_chunk
+
+        results_eval = evaluate_model(
+            model=model,
+            missing_w_nans_np=np.copy(validation_w_nan_np),
+            missing_complete_np=validation_complete_np,
+            na_ind=val_na_ind,
+            scaler=scaler,
+            recycles=recycles,
+            m=m_multi
+        )
+        results_eval["k"] = fold_idx
+        metric_value = _select_metric(results_eval, metric)
+
+        save_results(
+            results_eval,
+            epoch=completed_epochs,
+            beta=beta,
+            Cval=Cval,
+            results_path=results_path,
+            lock_path=lock_path
+        )
+
+        if best_metric - metric_value > tolerance:
+            best_metric = metric_value
+            no_improve = 0
+        else:
+            no_improve += 1
+
+        if completed_epochs >= max(epoch_chunk, min_epochs) and no_improve >= patience:
+            break
+
+    return best_metric, completed_epochs
+
+
+#########################################################
+# 5. Halving grid search utilities
+#########################################################
 
 
 def _select_metric(results: Dict, metric: str) -> float:
@@ -496,131 +590,307 @@ def _select_metric(results: Dict, metric: str) -> float:
     return math.inf
 
 
-def successive_halving_search(
-    beta_vals: List[float],
-    C_vals: List[float],
-    budgets: List[int],
-    keep_ratio: float,
-    metric: str,
-    train_tensor: torch.Tensor,
-    validation_w_nan_np: np.ndarray,
-    validation_complete_np: np.ndarray,
-    val_na_ind,
-    scaler,
-    recycles: int,
-    m_multi: int,
-    device: torch.device,
-    latent_dim: int,
-    h1: int,
-    h2: int,
-    lr: float,
-    batch_size: int,
-    results_path: str,
-    fold_idx: int
-):
-    """
-    Perform a coarse successive-halving search over (beta, C).
-    Each candidate trains up to each `budget` (epochs) cumulatively;
-    the worst-performing half is dropped each round.
-    """
-    candidates = [
-        {
-            "beta": b,
-            "C": c,
-            "model": None,
-            "optimizer": None,
-            "trained_epochs": 0,
-            "score": math.inf,
-        }
-        for b in beta_vals
-        for c in C_vals
-    ]
+def _prepare_epoch_settings(config: Dict, beta: float) -> Tuple[int, int]:
+    epoch_granularity = config.get("epoch_granularity", {"default": 30})
+    max_epochs_map = config.get("max_epochs_map", {"default": 300})
+    chunk = int(epoch_granularity.get(str(beta), epoch_granularity.get("default", 30)))
+    final_epochs = int(max_epochs_map.get(str(beta), max_epochs_map.get("default", 300)))
+    return chunk, final_epochs
 
-    def init_state(candidate):
+
+def run_candidate_cv(job_kwargs: Dict) -> Dict:
+    """
+    Worker entry: train and evaluate one (beta, C) across all folds.
+    """
+    beta = job_kwargs["beta"]
+    Cval = job_kwargs["C"]
+    config = job_kwargs["config"]
+    data_full = job_kwargs["data_full"]
+    data_missing_nan = job_kwargs["data_missing_nan"]
+    scaler = job_kwargs["scaler"]
+    device = torch.device(job_kwargs.get("device", "cpu"))
+
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+
+    metric = config.get("halving_metric", "mae")
+    tolerance = config.get("convergence_tolerance", 1e-4)
+    patience = config.get("convergence_patience", 2)
+    use_adam = config.get("use_adam_optimizer", False)
+    min_epochs = config.get("min_epochs_before_convergence", None)
+
+    batch_size = config["batch_size"]
+    lr = config["learning_rate"]
+    recycles = config["recycles"]
+    m_multi = config["m"]
+    k_folds = config["k_folds"]
+    latent_dim = config["latent_size"]
+    h1 = config["hidden_size_1"]
+    h2 = config["hidden_size_2"]
+    results_path = config["results_path"]
+
+    epoch_chunk, final_epochs = _prepare_epoch_settings(config, beta)
+    min_epochs = epoch_chunk if min_epochs is None else int(min_epochs)
+
+    fold_scores: List[float] = []
+    for fold_idx in range(k_folds):
+        (
+            training_input_np,
+            validation_w_nan_np,
+            validation_complete_np,
+            val_na_ind
+        ) = split_training_and_validation(
+            config,
+            fold_idx,
+            data_missing_nan,
+            data_full
+        )
+
+        train_tensor = torch.tensor(training_input_np, dtype=torch.float32)
         model = DisentangledBetaVaeTorchModule(
             input_dim=train_tensor.shape[1],
             latent_dim=latent_dim,
             hidden_dim1=h1,
             hidden_dim2=h2
         ).to(device)
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
-        candidate["model"] = model
-        candidate["optimizer"] = opt
-        candidate["trained_epochs"] = 0
+        optimizer = build_optimizer(model, lr=lr, use_adam=use_adam)
 
-    for budget in budgets:
-        if budget <= 0:
-            continue
+        best_metric, _ = train_fold_with_eval(
+            model=model,
+            optimizer=optimizer,
+            train_tensor=train_tensor,
+            beta=beta,
+            Cval=Cval,
+            device=device,
+            batch_size=batch_size,
+            epoch_chunk=epoch_chunk,
+            final_epochs=final_epochs,
+            metric=metric,
+            validation_w_nan_np=validation_w_nan_np,
+            validation_complete_np=validation_complete_np,
+            val_na_ind=val_na_ind,
+            scaler=scaler,
+            recycles=recycles,
+            m_multi=m_multi,
+            fold_idx=fold_idx,
+            results_path=results_path,
+            tolerance=tolerance,
+            patience=patience,
+            min_epochs=min_epochs
+        )
+        fold_scores.append(best_metric)
 
-        print(f"[Halving] Starting budget {budget} with {len(candidates)} candidates")
+    avg_score = float(np.mean(fold_scores))
+    return {
+        "beta": beta,
+        "C": Cval,
+        "score": avg_score,
+        "fold_scores": fold_scores,
+        "device": str(device)
+    }
 
-        for cand in candidates:
-            if cand["model"] is None:
-                init_state(cand)
 
-            extra_epochs = budget - cand["trained_epochs"]
-            if extra_epochs > 0:
-                train_one_fold(
-                    model=cand["model"],
-                    optimizer=cand["optimizer"],
-                    train_tensor=train_tensor,
-                    epochs=extra_epochs,
-                    beta=cand["beta"],
-                    Cval=cand["C"],
-                    device=device,
-                    batch_size=batch_size
-                )
-                cand["trained_epochs"] = budget
+def _available_devices() -> List[str]:
+    if torch.cuda.is_available():
+        gpus = torch.cuda.device_count()
+        if gpus > 1:
+            return [f"cuda:{i}" for i in range(gpus)]
+        return ["cuda:0"]
+    return ["cpu"]
 
-            results_eval = evaluate_model(
-                model=cand["model"],
-                missing_w_nans_np=np.copy(validation_w_nan_np),
-                missing_complete_np=validation_complete_np,
-                na_ind=val_na_ind,
-                scaler=scaler,
-                recycles=recycles,
-                m=m_multi
-            )
-            results_eval["k"] = fold_idx
-            cand["score"] = _select_metric(results_eval, metric)
 
-            save_results(
-                results_eval,
-                epoch=budget,
-                beta=cand["beta"],
-                Cval=cand["C"],
-                results_path=results_path,
-                lock_path='lock.txt'
-            )
+def _run_candidates_parallel(
+    candidates: List[Tuple[float, float]],
+    config: Dict,
+    data_full: np.ndarray,
+    data_missing_nan: np.ndarray,
+    scaler
+) -> List[Dict]:
+    """
+    Execute candidate CV jobs in parallel using GPUs when available,
+    otherwise CPU multiprocessing.
+    """
+    devices = _available_devices()
+    jobs = []
+    for idx, (b, c) in enumerate(candidates):
+        jobs.append({
+            "beta": b,
+            "C": c,
+            "config": config,
+            "data_full": data_full,
+            "data_missing_nan": data_missing_nan,
+            "scaler": scaler,
+            "device": devices[idx % len(devices)]
+        })
 
-        # rank and trim
-        candidates = sorted(candidates, key=lambda x: x["score"])
-        keep_count = max(1, int(math.ceil(len(candidates) * keep_ratio)))
+    if len(jobs) == 1:
+        return [run_candidate_cv(jobs[0])]
 
-        # free dropped models
-        for drop in candidates[keep_count:]:
-            drop["model"] = None
-            drop["optimizer"] = None
+    if devices == ["cpu"]:
+        workers = min(len(jobs), cpu_count())
+    else:
+        workers = min(len(jobs), len(devices))
 
-        candidates = candidates[:keep_count]
-        print(f"[Halving] Budget {budget} done; keeping {len(candidates)} candidates")
+    with Pool(processes=workers) as pool:
+        results = list(pool.imap_unordered(run_candidate_cv, jobs))
+    return results
 
-        if len(candidates) == 1:
+
+def iterative_halving_search(
+    config: Dict,
+    data_full: np.ndarray,
+    data_missing_nan: np.ndarray,
+    scaler
+) -> Dict:
+    """
+    Iteratively shrink beta/C ranges by evaluating four corner combos
+    until ranges are smaller than accuracy * original_span.
+    """
+    beta_min, beta_max = config["beta_range"]
+    C_min, C_max = config["C_range"]
+    accuracy = config.get("accuracy", 0.01)
+
+    beta_span0 = beta_max - beta_min
+    C_span0 = C_max - C_min
+
+    best_global = None
+    iteration = 0
+
+    while True:
+        iteration += 1
+        combos = [
+            (beta_min, C_min),
+            (beta_min, C_max),
+            (beta_max, C_min),
+            (beta_max, C_max),
+        ]
+        print(f"[Iter {iteration}] evaluating beta in [{beta_min}, {beta_max}] "
+              f"C in [{C_min}, {C_max}]")
+        results = _run_candidates_parallel(combos, config, data_full, data_missing_nan, scaler)
+        results = sorted(results, key=lambda r: r["score"])
+        best_round = results[0]
+        if best_global is None or best_round["score"] < best_global["score"]:
+            best_global = best_round
+
+        beta_m = (beta_min + beta_max) / 2.0
+        C_m = (C_min + C_max) / 2.0
+
+        if best_round["beta"] == beta_min and best_round["C"] == C_min:
+            beta_max = beta_m
+            C_max = C_m
+        elif best_round["beta"] == beta_min and best_round["C"] == C_max:
+            beta_max = beta_m
+            C_min = C_m
+        elif best_round["beta"] == beta_max and best_round["C"] == C_min:
+            beta_min = beta_m
+            C_max = C_m
+        else:
+            beta_min = beta_m
+            C_min = C_m
+
+        beta_span = beta_max - beta_min
+        C_span = C_max - C_min
+        if beta_span <= accuracy * beta_span0 and C_span <= accuracy * C_span0:
             break
 
-    best = sorted(candidates, key=lambda x: x["score"])[0]
-    print(f"[Halving] Best beta={best['beta']} C={best['C']} score={best['score']}")
-    return best
+    print(f"[Search done] best beta={best_global['beta']}, "
+          f"C={best_global['C']}, score={best_global['score']}")
+    return best_global
+
+
+def train_and_save_best_model(
+    beta_val: float,
+    Cval: float,
+    config: Dict,
+    data_full: np.ndarray,
+    data_missing_nan: np.ndarray,
+    scaler
+):
+    """
+    Train a single fold with the selected hyperparameters to persist a checkpoint.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    epoch_chunk, final_epochs = _prepare_epoch_settings(config, beta_val)
+    metric = config.get("halving_metric", "mae")
+    tolerance = config.get("convergence_tolerance", 1e-4)
+    patience = config.get("convergence_patience", 2)
+    min_epochs = config.get("min_epochs_before_convergence", epoch_chunk)
+
+    (
+        training_input_np,
+        validation_w_nan_np,
+        validation_complete_np,
+        val_na_ind
+    ) = split_training_and_validation(
+        config,
+        0,
+        data_missing_nan,
+        data_full
+    )
+
+    train_tensor = torch.tensor(training_input_np, dtype=torch.float32)
+    model = DisentangledBetaVaeTorchModule(
+        input_dim=train_tensor.shape[1],
+        latent_dim=config["latent_size"],
+        hidden_dim1=config["hidden_size_1"],
+        hidden_dim2=config["hidden_size_2"]
+    ).to(device)
+    optimizer = build_optimizer(
+        model,
+        lr=config["learning_rate"],
+        use_adam=config.get("use_adam_optimizer", False)
+    )
+
+    best_metric, completed_epochs = train_fold_with_eval(
+        model=model,
+        optimizer=optimizer,
+        train_tensor=train_tensor,
+        beta=beta_val,
+        Cval=Cval,
+        device=device,
+        batch_size=config["batch_size"],
+        epoch_chunk=epoch_chunk,
+        final_epochs=final_epochs,
+        metric=metric,
+        validation_w_nan_np=validation_w_nan_np,
+        validation_complete_np=validation_complete_np,
+        val_na_ind=val_na_ind,
+        scaler=scaler,
+        recycles=config["recycles"],
+        m_multi=config["m"],
+        fold_idx=0,
+        results_path=config["results_path"],
+        tolerance=tolerance,
+        patience=patience,
+        min_epochs=min_epochs
+    )
+
+    outdir = config.get("model_outdir", "./trained_models")
+    os.makedirs(outdir, exist_ok=True)
+    checkpoint_path = os.path.join(outdir, f"beta{beta_val}_C{Cval}_fold0.pt")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "beta": beta_val,
+            "C": Cval,
+            "fold": 0,
+            "epochs": completed_epochs,
+            "best_metric": best_metric,
+            "config": config
+        },
+        checkpoint_path
+    )
+    return checkpoint_path
 
 
 #########################################################
-# 5. Main cross-validation driver
+# 6. Main cross-validation driver
 #########################################################
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('d_index', type=int,
-                        help='global job index: selects fold (and beta/C when not using halving)')
+                        help='global job index: selects fold (legacy grid search compatibility)')
     parser.add_argument('--config', type=str,
                         default='cross_validation/cv_config.json',
                         help='path to configuration json')
@@ -630,35 +900,6 @@ def main():
 
     with open(args.config) as f:
         config = json.load(f)
-
-    # ------------------------------------------------------------------
-    # hyperparams grid (like beta_rates and epoch_granularity before)
-    # can be defined as ranges (for halving) or explicit lists.
-    # ------------------------------------------------------------------
-    use_halving = "beta_range" in config and "C_range" in config
-    if use_halving:
-        beta_grid = _linspace_range(
-            config["beta_range"],
-            config.get("beta_grid_points", 6)
-        )
-        C_grid = _linspace_range(
-            config["C_range"],
-            config.get("C_grid_points", 6)
-        )
-    else:
-        beta_grid = config.get("beta_grid", [0.5, 1.0, 2.0, 4.0, 8.0])
-        C_grid    = config.get("C_grid",   [0.0, 5.0, 10.0])
-
-    # training schedule assumptions
-    epoch_granularity = config.get("epoch_granularity", { "default": 30 })
-    max_epochs_map    = config.get("max_epochs_map", { "default": 300 })
-
-    k_folds = config['k_folds']
-    batch_size = config["batch_size"]
-    lr = config["learning_rate"]
-    recycles = config["recycles"]
-    m_multi = config["m"]
-    results_path = config["results_path"]
 
     # Load & scale data once
     data_full, data_missing_nan, scaler = get_scaled_data(
@@ -670,141 +911,42 @@ def main():
         nextflow=False
     )
 
-    fold_idx = d_index % k_folds
+    use_range_halving = "beta_range" in config and "C_range" in config
 
-    # pick epoch granularity & max epochs for this beta (fallback "default")
-    default_chunk = epoch_granularity.get("default", 30)
-    default_final = max_epochs_map.get("default", 300)
-
-    # prepare fold data
-    (
-        training_input_np,
-        validation_w_nan_np,
-        validation_complete_np,
-        val_na_ind
-    ) = split_training_and_validation(
-        config,
-        fold_idx,
-        data_missing_nan,
-        data_full
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    input_dim = training_input_np.shape[1]
-    latent_dim = config["latent_size"]
-    h1 = config["hidden_size_1"]
-    h2 = config["hidden_size_2"]
-
-    train_tensor = torch.tensor(training_input_np, dtype=torch.float32)
-
-    if use_halving:
-        halving_budgets = config.get(
-            "halving_epoch_budgets",
-            [default_chunk, default_chunk * 2, default_final]
+    if use_range_halving:
+        best_candidate = iterative_halving_search(
+            config=config,
+            data_full=data_full,
+            data_missing_nan=data_missing_nan,
+            scaler=scaler
         )
-        halving_budgets = sorted(set(int(b) for b in halving_budgets if b > 0))
-        halving_keep_ratio = config.get("halving_keep_ratio", 0.5)
-        halving_metric = config.get("halving_metric", "mae")
-
-        best_candidate = successive_halving_search(
-            beta_vals=beta_grid,
-            C_vals=C_grid,
-            budgets=halving_budgets,
-            keep_ratio=halving_keep_ratio,
-            metric=halving_metric,
-            train_tensor=train_tensor,
-            validation_w_nan_np=validation_w_nan_np,
-            validation_complete_np=validation_complete_np,
-            val_na_ind=val_na_ind,
-            scaler=scaler,
-            recycles=recycles,
-            m_multi=m_multi,
-            device=device,
-            latent_dim=latent_dim,
-            h1=h1,
-            h2=h2,
-            lr=lr,
-            batch_size=batch_size,
-            results_path=results_path,
-            fold_idx=fold_idx
-        )
-
-        vae = best_candidate["model"]
         beta_val = best_candidate["beta"]
         Cval = best_candidate["C"]
-        completed_epochs = best_candidate["trained_epochs"]
     else:
-        beta_val = beta_grid[(d_index // k_folds) % len(beta_grid)]
-        Cval = C_grid[(d_index // (k_folds * len(beta_grid))) % len(C_grid)]
-
-        epochs_chunk = epoch_granularity.get(str(beta_val),
-                         epoch_granularity.get("default", 30))
-        final_epochs = max_epochs_map.get(str(beta_val),
-                         max_epochs_map.get("default", 300))
-        rounds = int(final_epochs / epochs_chunk) + 1
-
-        print(f"[INFO] beta={beta_val}, C={Cval}, fold={fold_idx}, "
-              f"epochs_chunk={epochs_chunk}, rounds={rounds}, final_epochs={final_epochs}")
-
-        vae = DisentangledBetaVaeTorchModule(
-            input_dim=input_dim,
-            latent_dim=latent_dim,
-            hidden_dim1=h1,
-            hidden_dim2=h2
-        ).to(device)
-        optimizer = torch.optim.Adam(vae.parameters(), lr=lr)
-
-        for r in range(rounds):
-            last_total, last_recon, last_kl = train_one_fold(
-                model=vae,
-                optimizer=optimizer,
-                train_tensor=train_tensor,
-                epochs=epochs_chunk,
-                beta=beta_val,
-                Cval=Cval,
-                device=device,
-                batch_size=batch_size
-            )
-
-            completed_epochs = (r + 1) * epochs_chunk
-            print(f"[Fold {fold_idx}] after {completed_epochs} epochs "
-                  f"loss={last_total:.4f} recon={last_recon:.4f} kl={last_kl:.4f}")
-
-            results_eval = evaluate_model(
-                model=vae,
-                missing_w_nans_np=np.copy(validation_w_nan_np),
-                missing_complete_np=validation_complete_np,
-                na_ind=val_na_ind,
-                scaler=scaler,
-                recycles=recycles,
-                m=m_multi
-            )
-            results_eval["k"] = fold_idx
-
-            save_results(
-                results_eval,
-                epoch=completed_epochs,
-                beta=beta_val,
-                Cval=Cval,
-                results_path=results_path,
-                lock_path='lock.txt'
-            )
-
-    # optional: save final model weights for that (beta, C, fold)
-    outdir = config.get("model_outdir", "./trained_models")
-    os.makedirs(outdir, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": vae.state_dict() if vae is not None else None,
+        beta_grid = config.get("beta_grid", [0.5, 1.0, 2.0, 4.0, 8.0])
+        C_grid = config.get("C_grid", [0.0, 5.0, 10.0])
+        beta_val = beta_grid[d_index % len(beta_grid)]
+        Cval = C_grid[(d_index // len(beta_grid)) % len(C_grid)]
+        single_result = run_candidate_cv({
             "beta": beta_val,
             "C": Cval,
-            "fold": fold_idx,
-            "epochs": completed_epochs,
-            "config": config
-        },
-        os.path.join(outdir, f"beta{beta_val}_C{Cval}_fold{fold_idx}.pt")
+            "config": config,
+            "data_full": data_full,
+            "data_missing_nan": data_missing_nan,
+            "scaler": scaler,
+            "device": "cuda" if torch.cuda.is_available() else "cpu"
+        })
+        print(f"[Single run] beta={beta_val}, C={Cval}, score={single_result['score']}")
+
+    checkpoint_path = train_and_save_best_model(
+        beta_val=beta_val,
+        Cval=Cval,
+        config=config,
+        data_full=data_full,
+        data_missing_nan=data_missing_nan,
+        scaler=scaler
     )
+    print(f"Saved checkpoint to {checkpoint_path}")
 
 
 if __name__ == "__main__":

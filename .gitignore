@@ -5,3 +5,4 @@ Awan_2022_*mputed_datasets/
 *.lock
 prompts/*
 !prompts/output_non_ignored/
+__pycache__/
