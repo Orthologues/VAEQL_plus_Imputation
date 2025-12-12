@@ -1,56 +1,47 @@
-Updated LaTeX algorithm block reflecting the current cross-validation driver and successive-halving option in `codex_CV_beta_C_fine_tuning_draft/DisentangledBetaVAE.py` and the helper utilities:
+Updated LaTeX algorithm block matching the current corner-halving cross-validation driver in `codex_CV_beta_C_fine_tuning_draft/DisentangledBetaVAE.py`:
 
 ```tex
-\captionof{algorithm}{\textbf{Cross-Validated $\beta$–$C$ Search with Optional Successive Halving}}
-\label{algo:betaC_successive_halving}
+\captionof{algorithm}{\textbf{Corner-Halving $\beta$–$C$ Search with $K$-Fold Evaluation}}
+\label{algo:betaC_corner_halving}
 \begin{algorithmic}[10]
   \Require{ \
   \begin{tabular}[t]{@{}l@{}}
   \bfseries Input/config: \\
-  $X_{\mathrm{full}}, X_{\mathrm{miss}}$ from CSV paths \\ \Comment{via \textsc{GetScaledData}, returns scaled arrays + scaler $\mathcal{S}$ with NaNs restored in $X_{\mathrm{miss}}$} \\
-  $K$ \Comment{fold count} \\
-  $\mathcal{B},\mathcal{C}$ \Comment{either explicit grids or linspace from $\beta_{\text{range}}, C_{\text{range}}$} \\
-  $\text{epoch\_granularity}(\beta)$, $\text{max\_epochs}(\beta)$ \Comment{per-$\beta$ chunk + cap} \\
-  $\eta$ (Adam LR), $B$ (batch size), $R$ (recycle count), $M$ (multiple imputations) \\
-  $\text{budgets}$ \Comment{halving\_epoch\_budgets if using successive halving} \\
-  $\kappa$ \Comment{halving keep ratio} \\
-  $\mathfrak{m}$ \Comment{halving metric (e.g., MAE)} \\
+  data paths $\to (X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S})$ via \textsc{GetScaledData} \\ \Comment{$\mathcal{S}$ is the fitted scaler; $X_{\mathrm{miss}}$ keeps NaNs} \\
+  $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, accuracy $\alpha$ \\
+  $K$ folds, batch size $B$, learning rate $\eta$, recycles $R$, multi-imputations $M$ \\
+  $\text{budgets}$ \Comment{halving\_epoch\_budgets; chunk = $\min$, cap = $\max$ (fallback to epoch\_chunk/max\_epochs)} \\
+  tolerance $\tau$, patience $p$, optional $\text{min\_epochs}$, metric $\mathfrak{m}$ (default MAE) \\
   \end{tabular}
   }
   \Statex
-  \Procedure{\textit{RunCrossValidatedSearch}}{$d_{\text{index}}, \text{config}$}
-    \State $d \gets d_{\text{index}} - 1$; \quad load config JSON
-    \State $\text{use\_halving} \gets (\beta_{\text{range}} \land C_{\text{range}} \text{ present})$
-    \State $\mathcal{B} \gets$ explicit grid or $\mathrm{linspace}(\beta_{\text{range}})$; \quad $\mathcal{C} \gets$ likewise
-    \State $(X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}) \gets \textsc{GetScaledData}(\cdot,\text{return\_scaler}=1,\text{put\_nans\_back}=1)$
-    \State $k \gets d \bmod K$; \quad $(X_{\mathrm{train}}, X_{\mathrm{val}}^{\mathrm{miss}}, X_{\mathrm{val}}^{\mathrm{full}}, \mathrm{NA\_idx}) \gets \textsc{SplitTrainingAndValidation}(k)$
-    \If{\text{use\_halving}}
-      \State $\mathcal{H} \gets$ all $(\beta,C) \in \mathcal{B} \times \mathcal{C}$ with fresh models/optimizers
-      \For{$E \in \text{sorted}(\text{budgets})$}
-        \For{$h \in \mathcal{H}$}
-          \State $\Delta \gets E - h.\text{trained\_epochs}$; \quad \textsc{TrainOneFold}$(h.\text{model}, X_{\mathrm{train}}, \beta_h, C_h, \Delta, B, \eta)$
-          \State $m \gets \textsc{EvaluateModel}(h.\text{model}, X_{\mathrm{val}}^{\mathrm{miss}}, X_{\mathrm{val}}^{\mathrm{full}}, \mathrm{NA\_idx}, \mathcal{S}, R, M)$
-          \State $m.k \gets k$; \quad $m.\text{epoch} \gets E$; \quad \textsc{SaveResults}$(m,\beta_h,C_h)$
-          \State $h.\text{score} \gets \textsc{SelectMetric}(m,\mathfrak{m})$; \quad $h.\text{trained\_epochs} \gets E$
-        \EndFor
-        \State $\mathcal{H} \gets$ top $\lceil \kappa \cdot |\mathcal{H}| \rceil$ by $\text{score}$ (drop others)
-        \If{$|\mathcal{H}| = 1$} \textbf{break} \EndIf
-      \EndFor
-      \State $(\hat{\beta}, \hat{C}, \widehat{VAE}) \gets$ best in $\mathcal{H}$; \quad $\hat{E} \gets$ its trained epochs
-    \Else
-      \State $\beta \gets \mathcal{B}[(d // K) \bmod |\mathcal{B}|]$; \quad $C \gets \mathcal{C}[(d // (K \cdot |\mathcal{B}|)) \bmod |\mathcal{C}|]$
-      \State $\epsilon_{\text{chunk}} \gets \text{epoch\_granularity}[\beta]$ (default fallback); \quad $\epsilon_{\max} \gets \text{max\_epochs}[\beta]$
-      \State $\rho \gets \lfloor \epsilon_{\max} / \epsilon_{\text{chunk}} \rfloor + 1$; \quad init $VAE$, Adam($\eta$)
-      \For{$r = 1$ \textbf{to} $\rho$}
-        \State \textsc{TrainOneFold}$(VAE, X_{\mathrm{train}}, \beta, C, \epsilon_{\text{chunk}}, B, \eta)$
-        \State $m \gets \textsc{EvaluateModel}(VAE, X_{\mathrm{val}}^{\mathrm{miss}}, X_{\mathrm{val}}^{\mathrm{full}}, \mathrm{NA\_idx}, \mathcal{S}, R, M)$
-        \State $m.k \gets k$; \quad $m.\text{epoch} \gets r \cdot \epsilon_{\text{chunk}}$; \quad \textsc{SaveResults}$(m,\beta,C)$
-      \EndFor
-      \State $(\hat{\beta}, \hat{C}, \widehat{VAE}, \hat{E}) \gets (\beta, C, VAE, \rho \cdot \epsilon_{\text{chunk}})$
-    \EndIf
-    \State \textsc{SaveModelCheckpoint}$(\widehat{VAE}, \hat{\beta}, \hat{C}, k, \hat{E})$
+  \Procedure{\textit{CornerHalvingSearch}}{$\text{config}$}
+    \State load JSON config; $(X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}) \gets \textsc{GetScaledData}(\text{return\_scaler}=1,\text{put\_nans\_back}=1)$
+    \State $(\beta_0, C_0) \gets (\beta_{\max}-\beta_{\min},\, C_{\max}-C_{\min})$; \quad $\text{best} \gets \varnothing$
+    \While{$(\beta_{\max}-\beta_{\min} > \alpha \beta_0) \lor (C_{\max}-C_{\min} > \alpha C_0)$}
+      \State $\mathcal{Q} \gets \{(\beta_{\min},C_{\min}),(\beta_{\min},C_{\max}),(\beta_{\max},C_{\min}),(\beta_{\max},C_{\max})\}$
+      \State $\mathcal{R} \gets$ \textsc{RunCandidatesParallel}$(\mathcal{Q}, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
+      \State $r^\star \gets \arg\min_{r \in \mathcal{R}} r.\text{score}$; \quad \textbf{if} $\text{best}=\varnothing \lor r^\star.\text{score} < \text{best}.\text{score}$ \textbf{then} $\text{best} \gets r^\star$
+      \State $\beta_m \gets (\beta_{\min}+\beta_{\max})/2$; \quad $C_m \gets (C_{\min}+C_{\max})/2$
+      \State \textbf{update box toward winning corner}:
+      \State \quad \textbf{if} $r^\star=(\beta_{\min},C_{\min})$ \textbf{then} $(\beta_{\max},C_{\max}) \gets (\beta_m,C_m)$
+      \State \quad \textbf{elif} $r^\star=(\beta_{\min},C_{\max})$ \textbf{then} $(\beta_{\max},C_{\min}) \gets (\beta_m,C_m)$
+      \State \quad \textbf{elif} $r^\star=(\beta_{\max},C_{\min})$ \textbf{then} $(\beta_{\min},C_{\max}) \gets (\beta_m,C_m)$
+      \State \quad \textbf{else} $(\beta_{\min},C_{\min}) \gets (\beta_m,C_m)$
+    \EndWhile
+    \State \textsc{TrainAndSaveBestModel}$(\text{best}.\beta, \text{best}.C, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
+  \EndProcedure
+  \Statex
+  \Procedure{\textit{RunCandidateCV}}{$\beta, C, \text{config}$}
+    \For{$k = 0$ \textbf{to} $K-1$}
+      \State $(X_{\mathrm{train}}, X_{\mathrm{val}}^{\mathrm{miss}}, X_{\mathrm{val}}^{\mathrm{full}}, \mathrm{NA\_idx}) \gets \textsc{SplitTrainingAndValidation}(k)$
+      \State $(\epsilon_{\text{chunk}}, \epsilon_{\max}) \gets \text{budgets}$; \quad init VAE + optimizer (Adam if configured)
+      \State train in chunks until $\epsilon_{\max}$ or early-stop when metric $\mathfrak{m}$ stalls by $\tau$ for $p$ steps after $\text{min\_epochs}$
+      \State after each chunk: $m \gets \textsc{EvaluateModel}(VAE, X_{\mathrm{val}}^{\mathrm{miss}}, X_{\mathrm{val}}^{\mathrm{full}}, \mathrm{NA\_idx}, \mathcal{S}, R, M)$
+      \State annotate $m$ with fold $k$ and epoch; \textsc{SaveResults}$(m,\beta,C)$
+      \State keep the best chunk metric for this fold
+    \EndFor
+    \State \Return mean fold metric as candidate score
   \EndProcedure
 \end{algorithmic}
 ```
-
-Next step: drop this block into your manuscript or README to replace the prior grid-search-only description; adjust notation if you rename config keys.

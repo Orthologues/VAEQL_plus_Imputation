@@ -590,11 +590,18 @@ def _select_metric(results: Dict, metric: str) -> float:
     return math.inf
 
 
-def _prepare_epoch_settings(config: Dict, beta: float) -> Tuple[int, int]:
-    epoch_granularity = config.get("epoch_granularity", {"default": 30})
-    max_epochs_map = config.get("max_epochs_map", {"default": 300})
-    chunk = int(epoch_granularity.get(str(beta), epoch_granularity.get("default", 30)))
-    final_epochs = int(max_epochs_map.get(str(beta), max_epochs_map.get("default", 300)))
+def _epoch_settings_from_config(config: Dict) -> Tuple[int, int]:
+    """
+    Derive epoch chunk size and maximum epochs from config.
+    Uses halving_epoch_budgets if provided, otherwise falls back to static defaults.
+    """
+    budgets = config.get("halving_epoch_budgets")
+    if isinstance(budgets, (list, tuple)) and len(budgets) > 0:
+        chunk = int(min(budgets))
+        final_epochs = int(max(budgets))
+    else:
+        chunk = int(config.get("epoch_chunk", 30))
+        final_epochs = int(config.get("max_epochs", 300))
     return chunk, final_epochs
 
 
@@ -629,7 +636,7 @@ def run_candidate_cv(job_kwargs: Dict) -> Dict:
     h2 = config["hidden_size_2"]
     results_path = config["results_path"]
 
-    epoch_chunk, final_epochs = _prepare_epoch_settings(config, beta)
+    epoch_chunk, final_epochs = _epoch_settings_from_config(config)
     min_epochs = epoch_chunk if min_epochs is None else int(min_epochs)
 
     fold_scores: List[float] = []
@@ -691,11 +698,11 @@ def run_candidate_cv(job_kwargs: Dict) -> Dict:
 
 
 def _available_devices() -> List[str]:
-    if torch.cuda.is_available():
-        gpus = torch.cuda.device_count()
-        if gpus > 1:
-            return [f"cuda:{i}" for i in range(gpus)]
-        return ["cuda:0"]
+    """
+    Prefer multi-GPU. If only one or none, fall back to CPU for multiprocessing.
+    """
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        return [f"cuda:{i}" for i in range(torch.cuda.device_count())]
     return ["cpu"]
 
 
@@ -810,7 +817,7 @@ def train_and_save_best_model(
     Train a single fold with the selected hyperparameters to persist a checkpoint.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    epoch_chunk, final_epochs = _prepare_epoch_settings(config, beta_val)
+    epoch_chunk, final_epochs = _epoch_settings_from_config(config)
     metric = config.get("halving_metric", "mae")
     tolerance = config.get("convergence_tolerance", 1e-4)
     patience = config.get("convergence_patience", 2)
@@ -889,17 +896,16 @@ def train_and_save_best_model(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('d_index', type=int,
-                        help='global job index: selects fold (legacy grid search compatibility)')
     parser.add_argument('--config', type=str,
                         default='cross_validation/cv_config.json',
                         help='path to configuration json')
     args = parser.parse_args()
 
-    d_index = args.d_index - 1  # original script used 1-based
-
     with open(args.config) as f:
         config = json.load(f)
+
+    if "beta_range" not in config or "C_range" not in config:
+        raise ValueError("Config must include beta_range and C_range for halving search.")
 
     # Load & scale data once
     data_full, data_missing_nan, scaler = get_scaled_data(
@@ -911,32 +917,14 @@ def main():
         nextflow=False
     )
 
-    use_range_halving = "beta_range" in config and "C_range" in config
-
-    if use_range_halving:
-        best_candidate = iterative_halving_search(
-            config=config,
-            data_full=data_full,
-            data_missing_nan=data_missing_nan,
-            scaler=scaler
-        )
-        beta_val = best_candidate["beta"]
-        Cval = best_candidate["C"]
-    else:
-        beta_grid = config.get("beta_grid", [0.5, 1.0, 2.0, 4.0, 8.0])
-        C_grid = config.get("C_grid", [0.0, 5.0, 10.0])
-        beta_val = beta_grid[d_index % len(beta_grid)]
-        Cval = C_grid[(d_index // len(beta_grid)) % len(C_grid)]
-        single_result = run_candidate_cv({
-            "beta": beta_val,
-            "C": Cval,
-            "config": config,
-            "data_full": data_full,
-            "data_missing_nan": data_missing_nan,
-            "scaler": scaler,
-            "device": "cuda" if torch.cuda.is_available() else "cpu"
-        })
-        print(f"[Single run] beta={beta_val}, C={Cval}, score={single_result['score']}")
+    best_candidate = iterative_halving_search(
+        config=config,
+        data_full=data_full,
+        data_missing_nan=data_missing_nan,
+        scaler=scaler
+    )
+    beta_val = best_candidate["beta"]
+    Cval = best_candidate["C"]
 
     checkpoint_path = train_and_save_best_model(
         beta_val=beta_val,

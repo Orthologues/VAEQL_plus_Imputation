@@ -4,6 +4,12 @@
 
 # Repository Guidelines
 
+## Updated Hyperparameter Search Flow
+- Entry point: `python DisentangledBetaVAE.py --config cv_trainer_params.json` runs a 4-corner halving search over $(\beta, C)$ ranges, parallelizing candidates across GPUs/CPUs.
+- Each halving iteration evaluates the four current corners via `run_candidate_cv` (full $K$-fold CV with early stopping) and shrinks the search box toward the winning corner until both spans are within `accuracy * original_span`.
+- Epoch budgets come from `halving_epoch_budgets` (min = chunk, max = cap); fallback to `epoch_chunk`/`max_epochs` when budgets are absent. Convergence uses `convergence_tolerance`/`convergence_patience` with an optional `min_epochs_before_convergence`.
+- Metrics are logged to `beta_analysis.csv` for every fold/epoch chunk; the best $(\beta, C)$ is retrained once on fold 0 and checkpointed under `model_outdir`.
+
 ## Project Structure & Module Organization
 - `DisentangledBetaVAE.py` hosts the PyTorch beta-VAE model, CLI, and cross-validation driver.
 - `disentanbledBetaVaeUtil.py` (name preserved for compatibility) contains scaling, masking, and coverage utilities.
@@ -12,9 +18,9 @@
 
 ## Build, Test, and Development Commands
 - Set up an isolated env: `python -m venv .venv && source .venv/bin/activate` followed by `python -m pip install torch pandas scikit-learn`.
-- Run one fold: `python DisentangledBetaVAE.py 1 --config cv_trainer_params.json`; the index selects a beta/C/fold tuple.
-- Use `tail -f beta_analysis.csv` to monitor metrics; inspect checkpoints in `trained_models/` after runs.
-- For quick debugging, clone the config, shrink `k_folds` or `epoch_granularity`, and pass the new path to the CLI.
+- Run the halving search: `python DisentangledBetaVAE.py --config cv_trainer_params.json`.
+- Monitor progress with `tail -f beta_analysis.csv`; inspect checkpoints in `trained_models/` after runs.
+- For quick debugging, clone the config, shrink `k_folds`, `halving_epoch_budgets`, or narrow `beta_range`/`C_range`, then point `--config` to the clone.
 
 ## Coding Style & Naming Conventions
 - Stick to 4-space indents, type hints, and concise docstrings matching `evaluate_model` and `train_one_fold`.
@@ -36,4 +42,4 @@
 - Replace placeholder paths in `cv_trainer_params.json` with secure locations; never commit raw datasets.
 - Version alternative configs with suffixes like `cv_params_local.json` instead of editing the shared default.
 - After crashes, delete stray `lock.txt` and prune old checkpoints once archived elsewhere.
-- Hyperparam search now uses a 2D corner-halving loop: set `beta_range`, `C_range`, and `accuracy` to shrink ranges until the span is small enough, scoring with `halving_metric` and early-stopping via `convergence_tolerance`/`convergence_patience` (optional `min_epochs_before_convergence`). Per-beta epoch chunks/finals come from `epoch_granularity` and `max_epochs_map`. Omit the ranges to fall back to the legacy fixed `beta_grid`/`C_grid` selection.
+- Hyperparam search is now 2D corner-halving only: set `beta_range`, `C_range`, and `accuracy` to control shrinkage; `halving_metric` picks the scorer (fallback to `multi_mae` or `average_variance`). Budgets drive epoch chunks/caps, and convergence is gated by tolerance/patience with a minimum epoch guard.

@@ -20,7 +20,6 @@
   "latent_size": 16,
   "hidden_size_1": 128,
   "hidden_size_2": 64,
-  "epoch_granularity": {"default": 30, "4": 25},
-  "max_epochs_map": {"default": 300, "4": 400},
+  "min_epochs_before_convergence": 30,
   "model_outdir": "./trained_models"
 }
