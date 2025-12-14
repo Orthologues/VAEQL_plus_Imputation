@@ -12,7 +12,7 @@
 
 ## Project Structure & Module Organization
 - `DisentangledBetaVAE.py` hosts the PyTorch beta-VAE model, CLI, and cross-validation driver.
-- `disentanbledBetaVaeUtil.py` (name preserved for compatibility) contains scaling, masking, and coverage utilities.
+- `disentangledBetaVaeUtil.py` (name preserved for compatibility) contains scaling, masking, and coverage utilities.
 - `cv_trainer_params.json` stores beta/C ranges, data paths, scheduler hints; copy it before editing.
 - Long-running jobs emit `beta_analysis.csv`, `lock.txt`, and `trained_models/`; keep large artifacts out of git.
 
@@ -24,7 +24,7 @@
 
 ## Coding Style & Naming Conventions
 - Stick to 4-space indents, type hints, and concise docstrings matching `evaluate_model` and `train_one_fold`.
-- Group shared helpers inside `disentanbledBetaVaeUtil.py`; split out new classes when they outgrow a single file.
+- Group shared helpers inside `disentangledBetaVaeUtil.py`; split out new classes when they outgrow a single file.
 - Name files and functions snake_case, classes CamelCase; reuse existing config key casing when expanding JSON.
 - Surface new CLI flags through `argparse` and document defaults in the tracked config file.
 

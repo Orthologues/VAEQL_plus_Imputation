@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import KFold
 
-from disentanbledBetaVaeUtil import (
+from disentangledBetaVaeUtil import (
     get_scaled_data,
     evaluate_coverage,
     evaluate_coverage_quantile,
