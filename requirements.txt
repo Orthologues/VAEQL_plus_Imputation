@@ -10,3 +10,4 @@ nltk
 ucimlrepo
 pytest
 pythae
+mlflow

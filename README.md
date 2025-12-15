@@ -31,3 +31,11 @@ pip install -r requirements.txt
 ```bash
 conda clean --all -y && conda env create -f ml_env.yml 
 ```
+
+### Install Nextflow for reproducible analysis
+Firstly, ensure that Java (Java 11 or newer) is properly installed in your OS, then run:
+```
+curl -s https://get.nextflow.io | bash &&
+sudo mv nextflow /usr/local/bin/ &&
+nextflow -version
+```

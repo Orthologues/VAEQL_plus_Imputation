@@ -22,3 +22,4 @@ dependencies:
       - pyampute
       - stable-baselines3
       - ucimlrepo
+      - mlflow
