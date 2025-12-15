@@ -8,7 +8,7 @@ Updated LaTeX algorithm block matching the current corner-halving cross-validati
   \begin{tabular}[t]{@{}l@{}}
   \bfseries Input/config: \\
   data paths $\to (X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S})$ via \textsc{GetScaledData} \\ \Comment{$\mathcal{S}$ is the fitted scaler; $X_{\mathrm{miss}}$ keeps NaNs} \\
-  $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, accuracy $\alpha$ \\
+  $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, accuracy $\alpha$ \\ \Comment{Default value $\alpha_0=0.01$} \\
   $K$ folds, batch size $B$, learning rate $\eta$, recycles $R$, multi-imputations $M$ \\
   $\text{budget variables:}$ \\ \Comment{halving\_epoch\_budgets; chunk = $\min$, cap = $\max$ (fallback to epoch\_chunk/max\_epochs)} \\
   tolerance $\tau$, patience $p$, optional $\text{min\_epochs}$, metric $\mathfrak{m}$ (default MAE) \\
@@ -16,20 +16,21 @@ Updated LaTeX algorithm block matching the current corner-halving cross-validati
   }
   \Statex
   \Procedure{\textit{CornerHalvingSearch}}{$\text{config}$}
-    \State load JSON config; $(X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}) \gets \textsc{GetScaledData}(\text{return\_scaler}=1,\text{put\_nans\_back}=1)$
-    \State $(\beta_0, C_0) \gets (\beta_{\max}-\beta_{\min},\, C_{\max}-C_{\min})$; \quad $\text{best} \gets \varnothing$
+    \State load JSON config; $(X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}) \gets \textsc{GetScaledData}(\text{return\_scaler}=True,\text{put\_nans\_back}=True)$
+    \State $(\beta_0, C_0) \gets (\beta_{\max}-\beta_{\min},\, C_{\max}-C_{\min})$; \quad $q^\star \gets \varnothing$
     \While{$(\beta_{\max}-\beta_{\min} > \alpha \beta_0) \lor (C_{\max}-C_{\min} > \alpha C_0)$}
-      \State $\mathcal{Q} \gets \{(\beta_{\min},C_{\min}),(\beta_{\min},C_{\max}),(\beta_{\max},C_{\min}),(\beta_{\max},C_{\max})\}$
-      \State $\mathcal{R} \gets$ \textsc{RunCandidatesParallel}$(\mathcal{Q}, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
-      \State $r^\star \gets \arg\min_{r \in \mathcal{R}} r.\text{score}$; \quad \textbf{if} $\text{best}=\varnothing \lor r^\star.\text{score} < \text{best}.\text{score}$ \textbf{then} $\text{best} \gets r^\star$
       \State $\beta_m \gets (\beta_{\min}+\beta_{\max})/2$; \quad $C_m \gets (C_{\min}+C_{\max})/2$
-      \State \textbf{update box toward winning corner}:
-      \State \quad \textbf{if} $r^\star=(\beta_{\min},C_{\min})$ \textbf{then} $(\beta_{\max},C_{\max}) \gets (\beta_m,C_m)$
-      \State \quad \textbf{elif} $r^\star=(\beta_{\min},C_{\max})$ \textbf{then} $(\beta_{\max},C_{\min}) \gets (\beta_m,C_m)$
-      \State \quad \textbf{elif} $r^\star=(\beta_{\max},C_{\min})$ \textbf{then} $(\beta_{\min},C_{\max}) \gets (\beta_m,C_m)$
+      \State $\mathcal{Q} \gets \{(\beta_{\min},C_{\min}),(\beta_{\min},C_{\max}),(\beta_{\max},C_{\min}),(\beta_{\max},C_{\max})\}$
+      \State $\mathcal{R} \gets$ \textsc{RunCandidateCVsInParallel}$(\mathcal{Q}, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
+      \State $r^\star \gets \arg\min_{r \in \mathcal{R}} r.\text{score}$ 
+      \State $q^\star \gets r^\star.q$
+      \State \textbf{update the grid towards the winning sub-grid}:
+      \State \quad \textbf{if} $q^\star=(\beta_{\min},C_{\min})$ \textbf{then} $(\beta_{\max},C_{\max}) \gets (\beta_m,C_m)$
+      \State \quad \textbf{elif} $q^\star=(\beta_{\min},C_{\max})$ \textbf{then} $(\beta_{\max},C_{\min}) \gets (\beta_m,C_m)$
+      \State \quad \textbf{elif} $q^\star=(\beta_{\max},C_{\min})$ \textbf{then} $(\beta_{\min},C_{\max}) \gets (\beta_m,C_m)$
       \State \quad \textbf{else} $(\beta_{\min},C_{\min}) \gets (\beta_m,C_m)$
     \EndWhile
-    \State \textsc{TrainAndSaveBestModel}$(\text{best}.\beta, \text{best}.C, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
+    \State \textsc{TrainVAEQLwithBestParams}$(q^\star.\beta, q^\star.C, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
   \EndProcedure
   \Statex
   \Procedure{\textit{RunCandidateCV}}{$\beta, C, \text{config}$}

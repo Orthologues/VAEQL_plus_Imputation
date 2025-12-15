@@ -7,7 +7,7 @@
   "halving_metric": "mae",
   "convergence_tolerance": 0.0001,
   "convergence_patience": 2,
-  "use_adam_optimizer": false,
+  "use_adam_optimizer": true,
   "k_folds": 5,
   "learning_rate": 1e-3,
   "batch_size": 256,
@@ -18,8 +18,8 @@
   "corrupt_data_path": "path/to/masked.csv",
   "initial_imputation_strategy": "zero",
   "latent_size": 16,
-  "hidden_size_1": 128,
-  "hidden_size_2": 64,
+  "hidden_size_1": 64,
+  "hidden_size_2": 32,
   "min_epochs_before_convergence": 30,
   "model_outdir": "./trained_models"
 }
