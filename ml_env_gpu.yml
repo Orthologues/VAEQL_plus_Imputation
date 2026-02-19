@@ -4,7 +4,7 @@ channels:
   - defaults
 
 dependencies:
-  - python=3.10
+  - python=3.11
   - pip
   - numpy
   - pandas
@@ -22,3 +22,4 @@ dependencies:
       - stable-baselines3
       - ucimlrepo
       - mlflow
+      - pyspark
