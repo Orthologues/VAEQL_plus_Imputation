@@ -13,21 +13,87 @@ from typing import TypedDict, Tuple
 # local imports
 from .feat_types import FeaturesTypeDict
 
-# pre-training of the disentangled beta-VAE
-class DisentangledBetaVaeTuningConfig(TypedDict):
-    """Configuration for tuning the beta and C parameters of a disentangled VAE."""
+# Defaults for the VAE-QL pipeline (excluding dataset-specific values)
+VAE_DISC_LAT_DIM = 10
+VAE_CONT_LAT_DIM = 10
+VAE_ALPHA = 1e-3
+VAE_BETA = 4.0
+VAE_C = 0.0
+VAE_BATCH_SIZE = 128
+VAE_LAYERS = 2
+VAE_LAYER_SIZE = 256
+VAE_MAX_EPOCHS = 100
+VAE_IF_ADAM = True
+QL_ALPHA = 0.1
+QL_GAMMA = 0.9
+QL_EPSILON = 0.1
+QL_MAX_EPISODES = 1000
+QL_MAX_TIME_STEPS = 100
+NUM_OF_Q_AGENTS = 4
+REPLAY_BUFFER_SIZE = 10000
 
+DEFAULT_VAEQL_CONFIG: dict = {
+    "vae_disc_lat_dim": VAE_DISC_LAT_DIM,
+    "vae_cont_lat_dim": VAE_CONT_LAT_DIM,
+    "vae_alpha": VAE_ALPHA,
+    "vae_beta": VAE_BETA,
+    "vae_C": VAE_C,
+    "vae_batch_size": VAE_BATCH_SIZE,
+    "vae_layers": VAE_LAYERS,
+    "vae_layer_size": VAE_LAYER_SIZE,
+    "vae_max_epochs": VAE_MAX_EPOCHS,
+    "vae_if_Adam": VAE_IF_ADAM,
+    "ql_alpha": QL_ALPHA,
+    "ql_gamma": QL_GAMMA,
+    "ql_epsilon": QL_EPSILON,
+    "ql_max_episodes": QL_MAX_EPISODES,
+    "ql_max_time_steps": QL_MAX_TIME_STEPS,
+    "num_of_q_agents": NUM_OF_Q_AGENTS,
+    "replay_buffer_size": REPLAY_BUFFER_SIZE,
+}
+
+
+# pre-training of the disentangled beta-VAE (corner-halving search)
+class DisentangledBetaVaeTuningConfig(TypedDict):
+    """Configuration aligned with the corner-halving CV driver (DisentangledBetaVAE.py)."""
+
+    # dataset / architecture basics
     dataset_name: str
-    vae_disc_lat_dim: int # dimension of the discrete latent space S (number of mixed Gaussian distribution components)
-    vae_cont_lat_dim: int # dimension of the continuous latent space Z (each composed of the weighted disc_lat_dim Gaussian components)
-    beta_min: float
-    beta_max: float
-    C_min: float
-    C_max: float
-    max_granularity: float  # between 0 and 0.25, checks if the fine-tuned beta and C values are within this fraction of the original range (beta_min to beta_max, C_min to C_max)
-    num_epochs: int  # number of epochs per cross-validation tuning round
-    cross_val_rounds: int # number of cross-validation rounds for tuning beta and C (computed from max_granularity as ceil(log2(1 / max_granularity)))
+    vae_disc_lat_dim: int  # discrete latent dim
+    vae_cont_lat_dim: int  # continuous latent dim
+    latent_size: int
+    hidden_size_1: int
+    hidden_size_2: int
+
+    # search ranges and stopping criterion
+    beta_range: Tuple[float, float]
+    C_range: Tuple[float, float]
+    granularity: float  # shrink until spans <= granularity * initial_span
+    halving_min_rounds: int  # derived: ceil(log2(1 / granularity))
+
+    # training / optimization knobs
+    learning_rate: float
     batch_size: int
+    use_adam_optimizer: bool
+    epoch_chunk: int | None
+    max_epochs: int | None
+    halving_epoch_budgets: Tuple[int, ...]
+    halving_metric: str
+    convergence_tolerance: float
+    convergence_patience: int
+    min_epochs_before_convergence: int
+
+    # CV + evaluation
+    k_folds: int
+    recycles: int
+    m: int
+
+    # I/O paths and misc
+    results_path: str
+    data_path: str
+    corrupt_data_path: str
+    initial_imputation_strategy: str
+    model_outdir: str
 
     @classmethod
     def create(
@@ -36,56 +102,107 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         dataset_name: str,
         vae_disc_lat_dim: int,
         vae_cont_lat_dim: int,
-        beta_min: float,
-        beta_max: float,
-        C_min: float,
-        C_max: float,
-        max_granularity: float,
-        num_epochs: int,
+        latent_size: int,
+        hidden_size_1: int,
+        hidden_size_2: int,
+        beta_range: Tuple[float, float],
+        C_range: Tuple[float, float],
+        granularity: float,
+        learning_rate: float,
         batch_size: int,
+        use_adam_optimizer: bool,
+        k_folds: int,
+        recycles: int,
+        m: int,
+        results_path: str,
+        data_path: str,
+        corrupt_data_path: str,
+        initial_imputation_strategy: str,
+        model_outdir: str,
+        halving_epoch_budgets: Tuple[int, ...] | list[int] | None = None,
+        halving_metric: str = "mae",
+        convergence_tolerance: float = 1e-4,
+        convergence_patience: int = 2,
+        min_epochs_before_convergence: int = 30,
+        epoch_chunk: int | None = None,
+        max_epochs: int | None = None,
     ) -> "DisentangledBetaVaeTuningConfig":
-        """Construct a validated config and compute minimum CV rounds.
+        """Validate inputs and compute the minimum halving rounds from ``granularity``."""
 
-        Enforces:
-        - 0 < beta_min < beta_max
-        - 0 <= C_min < C_max
-        - 0 < max_granularity <= 0.25
+        b_min, b_max = beta_range
+        c_min, c_max = C_range
 
-        Computes the minimum cross-validation rounds as
-        ``ceil(log2(1 / max_granularity))``.
-        """
+        if b_min <= 0 or b_max <= 0:
+            raise ValueError("beta_range entries must be > 0.")
+        if b_min >= b_max:
+            raise ValueError("Require beta_range[0] < beta_range[1].")
 
-        if beta_min <= 0 or beta_max <= 0:
-            raise ValueError("beta_min and beta_max must be > 0.")
-        if beta_min >= beta_max:
-            raise ValueError("Require 0 < beta_min < beta_max.")
+        if c_min < 0 or c_max < 0:
+            raise ValueError("C_range entries must be >= 0.")
+        if c_min >= c_max:
+            raise ValueError("Require C_range[0] < C_range[1].")
 
-        if C_min < 0 or C_max < 0:
-            raise ValueError("C_min and C_max must be >= 0.")
-        if C_min >= C_max:
-            raise ValueError("Require 0 <= C_min < C_max.")
+        if not (0 < granularity <= 0.25):
+            raise ValueError("granularity must satisfy 0 < value <= 0.25.")
 
-        if not (0 < max_granularity <= 0.25):
-            raise ValueError("max_granularity must satisfy 0 < value <= 0.25.")
+        halving_min_rounds = math.ceil(math.log2(1.0 / granularity))
+        if halving_min_rounds < 2:
+            raise ValueError("Computed halving_min_rounds must be at least two; check granularity.")
 
-        min_cv_rounds = math.ceil(math.log2(1.0 / max_granularity))
-        if min_cv_rounds < 2:
-            raise ValueError(
-                "Computed minimum cross-validation rounds must be at least two; check max_granularity."
-            )
+        if learning_rate <= 0:
+            raise ValueError("learning_rate must be > 0.")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0.")
+        if k_folds <= 0:
+            raise ValueError("k_folds must be > 0.")
+        if recycles <= 0:
+            raise ValueError("recycles must be > 0.")
+        if m <= 0:
+            raise ValueError("m must be > 0.")
+        if latent_size <= 0 or hidden_size_1 <= 0 or hidden_size_2 <= 0:
+            raise ValueError("latent_size and hidden sizes must be > 0.")
+        if vae_disc_lat_dim <= 0 or vae_cont_lat_dim <= 0:
+            raise ValueError("Latent dims must be > 0.")
+
+        if epoch_chunk is not None and epoch_chunk <= 0:
+            raise ValueError("epoch_chunk must be > 0 when provided.")
+        if max_epochs is not None and max_epochs <= 0:
+            raise ValueError("max_epochs must be > 0 when provided.")
+
+        budgets: Tuple[int, ...] = tuple(halving_epoch_budgets) if halving_epoch_budgets else tuple()
+        for b in budgets:
+            if b <= 0:
+                raise ValueError("halving_epoch_budgets entries must be > 0.")
 
         cfg: "DisentangledBetaVaeTuningConfig" = cls(
             dataset_name=dataset_name,
             vae_disc_lat_dim=vae_disc_lat_dim,
             vae_cont_lat_dim=vae_cont_lat_dim,
-            beta_min=beta_min,
-            beta_max=beta_max,
-            C_min=C_min,
-            C_max=C_max,
-            max_granularity=max_granularity,
-            num_epochs=num_epochs,
+            latent_size=latent_size,
+            hidden_size_1=hidden_size_1,
+            hidden_size_2=hidden_size_2,
+            beta_range=beta_range,
+            C_range=C_range,
+            granularity=granularity,
+            halving_min_rounds=halving_min_rounds,
+            learning_rate=learning_rate,
             batch_size=batch_size,
-            cross_val_rounds=min_cv_rounds
+            use_adam_optimizer=use_adam_optimizer,
+            epoch_chunk=epoch_chunk,
+            max_epochs=max_epochs,
+            halving_epoch_budgets=budgets,
+            halving_metric=halving_metric,
+            convergence_tolerance=convergence_tolerance,
+            convergence_patience=convergence_patience,
+            min_epochs_before_convergence=min_epochs_before_convergence,
+            k_folds=k_folds,
+            recycles=recycles,
+            m=m,
+            results_path=results_path,
+            data_path=data_path,
+            corrupt_data_path=corrupt_data_path,
+            initial_imputation_strategy=initial_imputation_strategy,
+            model_outdir=model_outdir,
         )
 
         return cfg
@@ -130,29 +247,30 @@ class VaeQlConfig(TypedDict):
             raise ValueError(f"{name} must satisfy {bound}; got {value}.")
 
 
+    # define the default config values for the VAE-QL imputation pipeline; these can be overridden by the user when creating a config instance
     @classmethod
-    def create(
+    def initiate(
         cls,
         *,
         dataset_name: str,
         dataset_features: FeaturesTypeDict,
-        vae_disc_lat_dim: int,
-        vae_cont_lat_dim: int,
-        vae_alpha: float,
-        vae_beta: float,
-        vae_C: float,
-        vae_batch_size: int,
-        vae_layers: int,
-        vae_layer_size: int,
-        vae_max_epochs: int,
-        vae_if_Adam: bool,
-        ql_alpha: float,
-        ql_gamma: float,
-        ql_epsilon: float,
-        ql_max_episodes: int,
-        ql_max_time_steps: int,
-        num_of_q_agents: int,
-        replay_buffer_size: int,
+        **overrides: dict,
+    ) -> "VaeQlConfig":
+        """Return defaults union_dict with required dataset info and optional overrides."""
+
+        union_dict = {
+            "dataset_name": dataset_name,
+            "dataset_features": dataset_features,
+            **DEFAULT_VAEQL_CONFIG,
+            **overrides,
+        }
+        return cls.create(**union_dict)
+
+
+    @classmethod
+    def create(
+        cls,
+        **config: dict,
     ) -> "VaeQlConfig":
         """Construct and validate a VAE-QL pipeline config.
 
@@ -164,6 +282,33 @@ class VaeQlConfig(TypedDict):
         - Replay Buffer Size: replay_buffer_size >= ql_max_time_steps * num_of_q_agents
         """
         
+        union_dict = {**DEFAULT_VAEQL_CONFIG, **config}
+
+        dataset_name = union_dict.get("dataset_name")
+        dataset_features = union_dict.get("dataset_features")
+        vae_disc_lat_dim = union_dict.get("vae_disc_lat_dim")
+        vae_cont_lat_dim = union_dict.get("vae_cont_lat_dim")
+        vae_alpha = union_dict.get("vae_alpha")
+        vae_beta = union_dict.get("vae_beta")
+        vae_C = union_dict.get("vae_C")
+        vae_batch_size = union_dict.get("vae_batch_size")
+        vae_layers = union_dict.get("vae_layers")
+        vae_layer_size = union_dict.get("vae_layer_size")
+        vae_max_epochs = union_dict.get("vae_max_epochs")
+        vae_if_Adam = union_dict.get("vae_if_Adam")
+        ql_alpha = union_dict.get("ql_alpha")
+        ql_gamma = union_dict.get("ql_gamma")
+        ql_epsilon = union_dict.get("ql_epsilon")
+        ql_max_episodes = union_dict.get("ql_max_episodes")
+        ql_max_time_steps = union_dict.get("ql_max_time_steps")
+        num_of_q_agents = union_dict.get("num_of_q_agents")
+        replay_buffer_size = union_dict.get("replay_buffer_size")
+
+        if dataset_name is None:
+            raise ValueError("dataset_name must be provided.")
+        if dataset_features is None:
+            raise ValueError("dataset_features must be provided.")
+
         # Disentangled beta-VAE hyperparameters
         if vae_beta <= 0:
             raise ValueError(f"vae_beta must be > 0; got {vae_beta}.")
@@ -213,7 +358,7 @@ class VaeQlConfig(TypedDict):
             ql_max_episodes=ql_max_episodes,
             ql_max_time_steps=ql_max_time_steps,
             num_of_q_agents=num_of_q_agents,
-            replay_buffer_size=replay_buffer_size,
+            replay_buffer_size=replay_buffer_size
         )
 
         return cfg

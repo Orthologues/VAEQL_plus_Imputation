@@ -755,7 +755,7 @@ def iterative_halving_search(
     """
     beta_min, beta_max = config["beta_range"]
     C_min, C_max = config["C_range"]
-    accuracy = config.get("accuracy", 0.01)
+    granularity = config.get("granularity", 0.01)
 
     beta_span0 = beta_max - beta_min
     C_span0 = C_max - C_min
@@ -797,7 +797,7 @@ def iterative_halving_search(
 
         beta_span = beta_max - beta_min
         C_span = C_max - C_min
-        if beta_span <= accuracy * beta_span0 and C_span <= accuracy * C_span0:
+        if beta_span <= granularity * beta_span0 and C_span <= granularity * C_span0:
             break
 
     print(f"[Search done] best beta={best_global['beta']}, "

@@ -8,7 +8,7 @@ Updated LaTeX algorithm block matching the current corner-halving cross-validati
   \begin{tabular}[t]{@{}l@{}}
   \bfseries Input/config: \\
   data paths $\to (X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S})$ via \textsc{GetScaledData} \\ \Comment{$\mathcal{S}$ is the fitted scaler; $X_{\mathrm{miss}}$ keeps NaNs} \\
-  $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, accuracy $\alpha$ \\ \Comment{Default value $\alpha_0=0.01$} \\
+  $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, granularity $\alpha$ \\ \Comment{Default value $\alpha_0=0.01$} \\
   $K$ folds, batch size $B$, learning rate $\eta$, recycles $R$, multi-imputations $M$ \\
   $\text{budget variables:}$ \\ \Comment{halving\_epoch\_budgets; chunk = $\min$, cap = $\max$ (fallback to epoch\_chunk/max\_epochs)} \\
   tolerance $\tau$, patience $p$, optional $\text{min\_epochs}$, metric $\mathfrak{m}$ (default MAE) \\

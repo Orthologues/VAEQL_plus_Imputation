@@ -1,7 +1,7 @@
 {
   "beta_range": [0.1, 2],
   "C_range": [0, 10],
-  "accuracy": 0.01,
+  "granularity": 0.01,
   "halving_epoch_budgets": [30, 120, 300],
   "halving_keep_ratio": 0.5,
   "halving_metric": "mae",
