@@ -3,7 +3,7 @@
 # Email1: jiz@sdu.dk
 # Email2: jwz.student.bmc.lu@gmail.com
 # Date: 2026-02-19
-# Description: This file is used to define the typed dictionaries for the VAE-Q learning imputation baseline (non-cloud baseline solution run at on-premises servers).
+# Description: This file is used to define the typed dictionaries for the VAEQL imputation pipeline.
 #########################################################
 
 from typing import TypedDict, Set, Required, Dict
