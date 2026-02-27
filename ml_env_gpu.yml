@@ -27,8 +27,9 @@ dependencies:
   - torchaudio=2.5.*
   - pytorch-cuda=12.4
 
-  # Optional but helps avoid OpenMP/runtime issues in some setups
-  - intel-openmp
+  # Pin to avoid torch import error:
+  # undefined symbol: iJIT_NotifyEvent (seen with intel-openmp 2025.0.0)
+  - intel-openmp=2023.1.0
 
   - pip:
       - gensim
