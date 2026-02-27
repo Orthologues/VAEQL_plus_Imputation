@@ -1,0 +1,18 @@
+"""
+Convenience re-exports for VAEQL utility helpers with lazy loading.
+"""
+
+__classes__ = ["load_dataset", "load_pandas", "load_pyspark"]
+
+
+# non-essential methods to support IDE autocompletion and dir() introspection without eager loading
+
+def __getattr__(name: str):
+    if name in __classes__:
+        from . import dataset_loader as _dataset_loader  # local import to avoid eager loading
+        return getattr(_dataset_loader, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + __classes__)

@@ -44,7 +44,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     convergence_tolerance: float
     convergence_patience: int
     min_epochs_before_convergence: int
-
     # CV + evaluation
     k_folds: int
     recycles: int
@@ -176,6 +175,8 @@ class VaeQlConfig(TypedDict):
     # Dataset configs
     dataset_name: str
     dataset_features: FeaturesTypeDict
+    data_path: str
+    input_dim: int
     # VAE configs
     vae_disc_lat_dim: int # dimension of the discrete latent space S (number of mixed Gaussian distribution components)
     vae_cont_lat_dim: int # dimension of the continuous latent space Z (each composed of the weighted disc_lat_dim Gaussian components)
@@ -194,12 +195,16 @@ class VaeQlConfig(TypedDict):
     ql_epsilon_start: float # starting epsilon for the epsilon-greedy policy (off-policy exploration)
     ql_epsilon_end: float   # final epsilon value after decay
     ql_epsilon_decay: float # multiplicative decay factor applied each step/episode
-    ql_max_episodes: int # maximum number of episodes for the Q-learning training
+    ql_episodes_per_cycle: int # number of episodes for the Q-learning training per "Ensemble Cycle of Q-agent-reinforced VAE models" 
     ql_max_time_steps: int # maximum number of time steps per episode for the Q-learning training
-    # shared configs
+    ## reward calculation
+    ql_local_reward_eta: float # reward coefficient for the local imputation quality (e.g., negative delta of MAE of the same patient compared to the initial imputation for the current state)
+    # Shared configs
     num_of_q_agents: int # number of Q-learning agents to train in parallel (with shared experience replay buffer)
+    vaeql_cycles: int # number of "Ensemble Cycles of Q-agent-reinforced VAE models" to run; each cycle consists of training num_of_q_agents in parallel with shared experience replay, then retraining the VAEs on the public replay buffer (experience), then ensemble of the VAEs into one "consensus model" for the next cycle
     replay_buffer_size: int # maximum size of the experience replay buffer (must be >= ql_max_time_steps * num_of_q_agents to allow for at least one full episode per agent in the buffer)
-    
+    gaussian_outlier_sigma: float # sigma parameter for the Gaussian outlier penalty in the reward function (e.g., negative exp(- (imputation_error^2) / (2 * gaussian_outlier_sigma^2))) to penalize large imputation errors less heavily on values deviated from the mean
+
     
     def _gt_zero(name: str, value: int | float) -> None:
         if value <= 0:
@@ -219,6 +224,7 @@ class VaeQlConfig(TypedDict):
         *,
         dataset_name: str,
         dataset_features: FeaturesTypeDict,
+        data_path: str,
         vae_beta: float, #  tuned via the corner-halving search in the DisentangledBetaVaeTuningConfig; no default since this is a key hyperparameter for controlling the disentanglement of the VAE latent space, which is critical for the quality of the learned representations and thus the downstream Q-learning performance
         vae_C: float, #  tuned via the corner-halving search in the DisentangledBetaVaeTuningConfig as well
         **overrides: dict, # optional overrides for any of the other config values (e.g., vae_alpha, ql_alpha, ql_gamma, ql_epsilon_start, ql_epsilon_end, ql_epsilon_decay, etc.); these will be merged with the defaults defined in DEFAULT_VAEQL_CONFIG
@@ -230,6 +236,7 @@ class VaeQlConfig(TypedDict):
             "dataset_features": dataset_features,
             "vae_beta": vae_beta,
             "vae_C": vae_C,
+            "data_path": data_path,
             **DEFAULT_VAEQL_CONFIG,
             **overrides,
         }
@@ -275,11 +282,16 @@ class VaeQlConfig(TypedDict):
         ql_max_time_steps = union_dict.get("ql_max_time_steps")
         num_of_q_agents = union_dict.get("num_of_q_agents")
         replay_buffer_size = union_dict.get("replay_buffer_size")
-
+        
         if dataset_name is None:
             raise ValueError("dataset_name must be provided.")
         if dataset_features is None:
             raise ValueError("dataset_features must be provided.")
+        
+        try:
+            input_dim = dataset_features["all_feats"].__len__()  # returns to the length of a set
+        except Exception as e:
+            raise ValueError(f"dataset_features must contain 'all_feats' key, which refers to a set of all feature names; error: {e}")
 
         # Disentangled beta-VAE hyperparameters
         if vae_beta <= 0:
@@ -339,7 +351,8 @@ class VaeQlConfig(TypedDict):
             ql_max_episodes=ql_max_episodes,
             ql_max_time_steps=ql_max_time_steps,
             num_of_q_agents=num_of_q_agents,
-            replay_buffer_size=replay_buffer_size
+            replay_buffer_size=replay_buffer_size,
+            input_dim=input_dim
         )
 
         return cfg
