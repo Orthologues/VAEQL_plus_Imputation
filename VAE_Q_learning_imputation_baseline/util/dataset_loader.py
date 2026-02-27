@@ -8,10 +8,9 @@
 
 from pathlib import Path
 from typing import Iterable, Literal, TYPE_CHECKING
-
-from ..conf import FeaturesTypeDict, VaeQlConfig
-
 import pandas as pd
+
+from ..conf import FeaturesTypeDict
 
 
 if TYPE_CHECKING:  # avoid hard dependency on pyspark unless the pyspark loader is used
@@ -19,13 +18,6 @@ if TYPE_CHECKING:  # avoid hard dependency on pyspark unless the pyspark loader 
 
 # Default root where preprocessed CSVs live; adjust per environment if needed.
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / "datasets_preprocessing" / "preprocessed_datasets"
-
-__all__ = [
-    "DEFAULT_DATA_ROOT",
-    "load_dataset",
-    "load_pandas",
-    "load_pyspark",
-]
 
 
 def _resolve_path(dataset_name: str, root: str | Path | None) -> Path:
@@ -51,37 +43,40 @@ def _ordered_feature_columns(df_columns: Iterable[str], features: FeaturesTypeDi
 
 
 def load_pandas(
-    config: VaeQlConfig,
+    dataset_name: str,
+    features: FeaturesTypeDict,
     *,
     data_root: str | Path | None = None,
     **read_csv_kwargs,
 ) -> pd.DataFrame:
-    """Load dataset as pandas DataFrame with columns validated against config features."""
-    path = _resolve_path(config["dataset_name"], data_root)
+    """Load dataset as pandas DataFrame with columns validated against provided features."""
+    path = _resolve_path(dataset_name, data_root)
     df = pd.read_csv(path, **read_csv_kwargs)
-    cols = _ordered_feature_columns(df.columns, config["dataset_features"])
+    cols = _ordered_feature_columns(df.columns, features)
     return df.loc[:, cols]
 
 
 def load_pyspark(
-    config: VaeQlConfig,
+    dataset_name: str,
+    features: FeaturesTypeDict,
     *,
     spark: "SparkSession | None" = None,
     data_root: str | Path | None = None,
     **read_csv_kwargs,
 ) -> "SparkDataFrame":
-    """Load dataset as Spark DataFrame with columns validated against config features."""
+    """Load dataset as Spark DataFrame with columns validated against provided features."""
     from pyspark.sql import SparkSession  # local import to keep dependency optional
 
-    path = _resolve_path(config["dataset_name"], data_root)
+    path = _resolve_path(dataset_name, data_root)
     spark = spark or SparkSession.builder.getOrCreate()
     df = spark.read.csv(str(path), header=True, inferSchema=True, **read_csv_kwargs)
-    cols = _ordered_feature_columns(df.columns, config["dataset_features"])
+    cols = _ordered_feature_columns(df.columns, features)
     return df.select(cols)
 
 
 def load_dataset(
-    config: VaeQlConfig,
+    dataset_name: str,
+    features: FeaturesTypeDict,
     *,
     engine: Literal["pandas", "pyspark"] = "pandas",
     data_root: str | Path | None = None,
@@ -89,7 +84,7 @@ def load_dataset(
 ):
     """Convenience wrapper choosing pandas or pyspark backend."""
     if engine == "pandas":
-        return load_pandas(config, data_root=data_root, **kwargs)
+        return load_pandas(dataset_name, features, data_root=data_root, **kwargs)
     if engine == "pyspark":
-        return load_pyspark(config, data_root=data_root, **kwargs)
+        return load_pyspark(dataset_name, features, data_root=data_root, **kwargs)
     raise ValueError(f"Unsupported engine '{engine}'. Use 'pandas' or 'pyspark'.")

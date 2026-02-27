@@ -2,8 +2,9 @@
 Convenience re-exports for VAEQL utility helpers with lazy loading.
 """
 
+__methods__ = []
 __classes__ = ["load_dataset", "load_pandas", "load_pyspark"]
-
+__all__ = __methods__ + __classes__
 
 # non-essential methods to support IDE autocompletion and dir() introspection without eager loading
 
@@ -15,4 +16,4 @@ def __getattr__(name: str):
 
 
 def __dir__():
-    return sorted(list(globals().keys()) + __classes__)
+    return sorted(list(globals().keys()) + __all__)

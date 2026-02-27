@@ -7,12 +7,22 @@
 #########################################################
 
 # general imports
+import importlib
 import math
 from typing import TypedDict, Tuple
 
 # local imports
 from .feat_types import FeaturesTypeDict
 from .DEFAULT import DEFAULT_VAEQL_CONFIG
+
+
+def _resolve_device():
+    """Resolve torch device lazily and fail-safe to CPU if torch is unavailable/broken."""
+    try:
+        torch = importlib.import_module("torch")
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    except Exception:
+        return "cpu"
 
 
 # pre-training of the disentangled beta-VAE (corner-halving search)
@@ -44,6 +54,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     convergence_tolerance: float
     convergence_patience: int
     min_epochs_before_convergence: int
+    device = _resolve_device()
     # CV + evaluation
     k_folds: int
     recycles: int
@@ -204,6 +215,7 @@ class VaeQlConfig(TypedDict):
     vaeql_cycles: int # number of "Ensemble Cycles of Q-agent-reinforced VAE models" to run; each cycle consists of training num_of_q_agents in parallel with shared experience replay, then retraining the VAEs on the public replay buffer (experience), then ensemble of the VAEs into one "consensus model" for the next cycle
     replay_buffer_size: int # maximum size of the experience replay buffer (must be >= ql_max_time_steps * num_of_q_agents to allow for at least one full episode per agent in the buffer)
     gaussian_outlier_sigma: float # sigma parameter for the Gaussian outlier penalty in the reward function (e.g., negative exp(- (imputation_error^2) / (2 * gaussian_outlier_sigma^2))) to penalize large imputation errors less heavily on values deviated from the mean
+    device = _resolve_device()
 
     
     def _gt_zero(name: str, value: int | float) -> None:
