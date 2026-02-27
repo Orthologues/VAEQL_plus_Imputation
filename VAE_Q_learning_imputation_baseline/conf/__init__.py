@@ -5,8 +5,8 @@ Designed to avoid double-importing `config.py` when running
 `python -m VAE_Q_learning_imputation_baseline.conf.config`.
 """
 
-__methods__ = ["FeaturesTypeDict", "VaeQlConfig", "DisentangledBetaVaeTuningConfig"]
-__classes__ = []
+__methods__ = []
+__classes__ = ["FeaturesTypeDict", "VaeQlConfig", "DisentangledBetaVaeTuningConfig"]
 __all__ = __methods__ + __classes__
 
 # non-essential methods to support IDE autocompletion and dir() introspection without eager loading

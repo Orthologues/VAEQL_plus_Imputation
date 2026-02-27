@@ -1,6 +1,17 @@
+
+# Commands to reactivate this env cleanly if needed:
+#conda deactivate
+#conda env remove -n ml_env_gpu
+#conda env create -f ml_env_gpu.yml
+#conda activate ml_env_gpu
+#conda config --env --set channel_priority strict
+#python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+
 name: ml_env_gpu
 channels:
   - pytorch
+  - nvidia
   - defaults
 
 dependencies:
@@ -9,9 +20,15 @@ dependencies:
   - numpy
   - pandas
   - scikit-learn
-  - pytorch
-  - torchvision
-  - torchaudio
+
+  # PyTorch stack (single source: conda pytorch+nvidia)
+  - pytorch=2.5.*
+  - torchvision=0.20.*
+  - torchaudio=2.5.*
+  - pytorch-cuda=12.4
+
+  # Optional but helps avoid OpenMP/runtime issues in some setups
+  - intel-openmp
 
   - pip:
       - gensim

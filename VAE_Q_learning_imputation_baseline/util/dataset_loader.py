@@ -16,13 +16,12 @@ from ..conf import FeaturesTypeDict
 if TYPE_CHECKING:  # avoid hard dependency on pyspark unless the pyspark loader is used
     from pyspark.sql import SparkSession, DataFrame as SparkDataFrame  # pragma: no cover
 
-# Default root where preprocessed CSVs live; adjust per environment if needed.
-DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / "datasets_preprocessing" / "preprocessed_datasets"
-
 
 def _resolve_path(dataset_name: str, root: str | Path | None) -> Path:
     """Resolve dataset name to a CSV path."""
-    base = Path(root) if root is not None else DEFAULT_DATA_ROOT
+    base = Path(root) if root is not None else (
+        Path(__file__).resolve().parents[1] / "datasets_preprocessing" / "preprocessed_datasets"
+    )
     # Allow callers to pass an explicit file path or bare name.
     candidate = Path(dataset_name)
     if candidate.suffix and candidate.exists():
