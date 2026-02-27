@@ -12,45 +12,7 @@ from typing import TypedDict, Tuple
 
 # local imports
 from .feat_types import FeaturesTypeDict
-
-# Defaults for the VAE-QL pipeline (excluding dataset-specific values)
-VAE_DISC_LAT_DIM = 10
-VAE_CONT_LAT_DIM = 10
-VAE_ALPHA = 1e-3
-VAE_BETA = 4.0
-VAE_C = 0.0
-VAE_BATCH_SIZE = 128
-VAE_LAYERS = 2
-VAE_LAYER_SIZE = 256
-VAE_MAX_EPOCHS = 100
-VAE_IF_ADAM = True
-QL_ALPHA = 0.1
-QL_GAMMA = 0.9
-QL_EPSILON = 0.1
-QL_MAX_EPISODES = 1000
-QL_MAX_TIME_STEPS = 100
-NUM_OF_Q_AGENTS = 4
-REPLAY_BUFFER_SIZE = 10000
-
-DEFAULT_VAEQL_CONFIG: dict = {
-    "vae_disc_lat_dim": VAE_DISC_LAT_DIM,
-    "vae_cont_lat_dim": VAE_CONT_LAT_DIM,
-    "vae_alpha": VAE_ALPHA,
-    "vae_beta": VAE_BETA,
-    "vae_C": VAE_C,
-    "vae_batch_size": VAE_BATCH_SIZE,
-    "vae_layers": VAE_LAYERS,
-    "vae_layer_size": VAE_LAYER_SIZE,
-    "vae_max_epochs": VAE_MAX_EPOCHS,
-    "vae_if_Adam": VAE_IF_ADAM,
-    "ql_alpha": QL_ALPHA,
-    "ql_gamma": QL_GAMMA,
-    "ql_epsilon": QL_EPSILON,
-    "ql_max_episodes": QL_MAX_EPISODES,
-    "ql_max_time_steps": QL_MAX_TIME_STEPS,
-    "num_of_q_agents": NUM_OF_Q_AGENTS,
-    "replay_buffer_size": REPLAY_BUFFER_SIZE,
-}
+from .DEFAULT import DEFAULT_VAEQL_CONFIG
 
 
 # pre-training of the disentangled beta-VAE (corner-halving search)
@@ -62,14 +24,14 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     vae_disc_lat_dim: int  # discrete latent dim
     vae_cont_lat_dim: int  # continuous latent dim
     latent_size: int
-    hidden_size_1: int
-    hidden_size_2: int
+    vae_hidden_size_1: int
+    vae_hidden_size_2: int
 
     # search ranges and stopping criterion
     beta_range: Tuple[float, float]
     C_range: Tuple[float, float]
     granularity: float  # shrink until spans <= granularity * initial_span
-    halving_min_rounds: int  # derived: ceil(log2(1 / granularity))
+    halving_rounds: int  # derived: ceil(log2(1 / granularity))
 
     # training / optimization knobs
     learning_rate: float
@@ -103,8 +65,8 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         vae_disc_lat_dim: int,
         vae_cont_lat_dim: int,
         latent_size: int,
-        hidden_size_1: int,
-        hidden_size_2: int,
+        vae_hidden_size_1: int,
+        vae_hidden_size_2: int,
         beta_range: Tuple[float, float],
         C_range: Tuple[float, float],
         granularity: float,
@@ -145,9 +107,9 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         if not (0 < granularity <= 0.25):
             raise ValueError("granularity must satisfy 0 < value <= 0.25.")
 
-        halving_min_rounds = math.ceil(math.log2(1.0 / granularity))
-        if halving_min_rounds < 2:
-            raise ValueError("Computed halving_min_rounds must be at least two; check granularity.")
+        halving_rounds = math.ceil(math.log2(1.0 / granularity))
+        if halving_rounds < 2:
+            raise ValueError("Computed halving_rounds must be at least two; check granularity.")
 
         if learning_rate <= 0:
             raise ValueError("learning_rate must be > 0.")
@@ -159,7 +121,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             raise ValueError("recycles must be > 0.")
         if m <= 0:
             raise ValueError("m must be > 0.")
-        if latent_size <= 0 or hidden_size_1 <= 0 or hidden_size_2 <= 0:
+        if latent_size <= 0 or vae_hidden_size_1 <= 0 or vae_hidden_size_2 <= 0:
             raise ValueError("latent_size and hidden sizes must be > 0.")
         if vae_disc_lat_dim <= 0 or vae_cont_lat_dim <= 0:
             raise ValueError("Latent dims must be > 0.")
@@ -179,12 +141,12 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             vae_disc_lat_dim=vae_disc_lat_dim,
             vae_cont_lat_dim=vae_cont_lat_dim,
             latent_size=latent_size,
-            hidden_size_1=hidden_size_1,
-            hidden_size_2=hidden_size_2,
+            vae_hidden_size_1=vae_hidden_size_1,
+            vae_hidden_size_2=vae_hidden_size_2,
             beta_range=beta_range,
             C_range=C_range,
             granularity=granularity,
-            halving_min_rounds=halving_min_rounds,
+            halving_rounds=halving_rounds,
             learning_rate=learning_rate,
             batch_size=batch_size,
             use_adam_optimizer=use_adam_optimizer,
@@ -222,13 +184,16 @@ class VaeQlConfig(TypedDict):
     vae_C: float # capacity parameter for the KL term of the VAE loss (reconstruction error + KL divergence)
     vae_batch_size: int
     vae_layers: int # number of layers for the VAE encoder and decoder (symmetric architecture)
-    vae_layer_size: int # number of neurons for each layer in the VAE encoder and decoder (symmetric architecture)
+    vae_hidden_size1: int # number of neurons in the first hidden layer for the VAE encoder and decoder (symmetric architecture)
+    vae_hidden_size2: int # number of neurons in the second hidden layer for the VAE encoder and decoder (symmetric architecture)
     vae_max_epochs: int # maximum number of epochs for the VAE training
     vae_if_Adam: bool # whether to use the Adam optimizer for the VAE training (if False, will use vanilla SGD)
     # Q-learning configs
     ql_alpha: float # learning rate for the Q-value update
     ql_gamma: float # discount factor for the max Q-value of the transition's destination state
-    ql_epsilon: float # parameter for the epsilon-greedy policy (off-policy exploration)
+    ql_epsilon_start: float # starting epsilon for the epsilon-greedy policy (off-policy exploration)
+    ql_epsilon_end: float   # final epsilon value after decay
+    ql_epsilon_decay: float # multiplicative decay factor applied each step/episode
     ql_max_episodes: int # maximum number of episodes for the Q-learning training
     ql_max_time_steps: int # maximum number of time steps per episode for the Q-learning training
     # shared configs
@@ -254,13 +219,17 @@ class VaeQlConfig(TypedDict):
         *,
         dataset_name: str,
         dataset_features: FeaturesTypeDict,
-        **overrides: dict,
+        vae_beta: float, #  tuned via the corner-halving search in the DisentangledBetaVaeTuningConfig; no default since this is a key hyperparameter for controlling the disentanglement of the VAE latent space, which is critical for the quality of the learned representations and thus the downstream Q-learning performance
+        vae_C: float, #  tuned via the corner-halving search in the DisentangledBetaVaeTuningConfig as well
+        **overrides: dict, # optional overrides for any of the other config values (e.g., vae_alpha, ql_alpha, ql_gamma, ql_epsilon_start, ql_epsilon_end, ql_epsilon_decay, etc.); these will be merged with the defaults defined in DEFAULT_VAEQL_CONFIG
     ) -> "VaeQlConfig":
         """Return defaults union_dict with required dataset info and optional overrides."""
 
         union_dict = {
             "dataset_name": dataset_name,
             "dataset_features": dataset_features,
+            "vae_beta": vae_beta,
+            "vae_C": vae_C,
             **DEFAULT_VAEQL_CONFIG,
             **overrides,
         }
@@ -278,7 +247,7 @@ class VaeQlConfig(TypedDict):
         - Latent dims, layers, layer_size, batch_size, epochs, episodes, time steps, buffer: strictly > 0
         - Learning rates/coefficients: 0 < vae_alpha, ql_alpha <= 1; 0 < vae_beta; vae_C >= 0
         - Discount factor: 0 < ql_gamma <= 1
-        - Epsilon: 0 <= ql_epsilon <= 1
+        - Epsilon schedule: 0 < ql_epsilon_start <= 1; 0 <= ql_epsilon_end <= 1; 0 < ql_epsilon_decay <= 1; ql_epsilon_start >= ql_epsilon_end
         - Replay Buffer Size: replay_buffer_size >= ql_max_time_steps * num_of_q_agents
         """
         
@@ -293,12 +262,15 @@ class VaeQlConfig(TypedDict):
         vae_C = union_dict.get("vae_C")
         vae_batch_size = union_dict.get("vae_batch_size")
         vae_layers = union_dict.get("vae_layers")
-        vae_layer_size = union_dict.get("vae_layer_size")
+        vae_hidden_size1 = union_dict.get("vae_hidden_size1")
+        vae_hidden_size2 = union_dict.get("vae_hidden_size2")
         vae_max_epochs = union_dict.get("vae_max_epochs")
         vae_if_Adam = union_dict.get("vae_if_Adam")
         ql_alpha = union_dict.get("ql_alpha")
         ql_gamma = union_dict.get("ql_gamma")
-        ql_epsilon = union_dict.get("ql_epsilon")
+        ql_epsilon_start = union_dict.get("ql_epsilon_start")
+        ql_epsilon_end = union_dict.get("ql_epsilon_end")
+        ql_epsilon_decay = union_dict.get("ql_epsilon_decay")
         ql_max_episodes = union_dict.get("ql_max_episodes")
         ql_max_time_steps = union_dict.get("ql_max_time_steps")
         num_of_q_agents = union_dict.get("num_of_q_agents")
@@ -320,7 +292,8 @@ class VaeQlConfig(TypedDict):
             ("vae_disc_lat_dim", vae_disc_lat_dim),
             ("vae_cont_lat_dim", vae_cont_lat_dim),
             ("vae_layers", vae_layers),
-            ("vae_layer_size", vae_layer_size),
+            ("vae_hidden_size1", vae_hidden_size1),
+            ("vae_hidden_size2", vae_hidden_size2),
             ("vae_batch_size", vae_batch_size),
             ("vae_max_epochs", vae_max_epochs),
             ("ql_max_episodes", ql_max_episodes),
@@ -336,7 +309,12 @@ class VaeQlConfig(TypedDict):
         cls._in_unit_interval("vae_alpha", vae_alpha)
         cls._in_unit_interval("ql_alpha", ql_alpha)
         cls._in_unit_interval("ql_gamma", ql_gamma)
-        cls._in_unit_interval("ql_epsilon", ql_epsilon, inclusive_zero=True)
+        cls._in_unit_interval("ql_epsilon_start", ql_epsilon_start)
+        cls._in_unit_interval("ql_epsilon_end", ql_epsilon_end, inclusive_zero=True)
+        cls._in_unit_interval("ql_epsilon_decay", ql_epsilon_decay)
+
+        if ql_epsilon_start < ql_epsilon_end:
+            raise ValueError(f"ql_epsilon_start must be >= ql_epsilon_end; got {ql_epsilon_start} < {ql_epsilon_end}.")
         
 
         cfg: "VaeQlConfig" = cls(
@@ -349,12 +327,15 @@ class VaeQlConfig(TypedDict):
             vae_C=vae_C,
             vae_batch_size=vae_batch_size,
             vae_layers=vae_layers,
-            vae_layer_size=vae_layer_size,
+            vae_hidden_size1=vae_hidden_size1,
+            vae_hidden_size2=vae_hidden_size2,
             vae_max_epochs=vae_max_epochs,
             vae_if_Adam=vae_if_Adam,
             ql_alpha=ql_alpha,
             ql_gamma=ql_gamma,
-            ql_epsilon=ql_epsilon,
+            ql_epsilon_start=ql_epsilon_start,
+            ql_epsilon_end=ql_epsilon_end,
+            ql_epsilon_decay=ql_epsilon_decay,
             ql_max_episodes=ql_max_episodes,
             ql_max_time_steps=ql_max_time_steps,
             num_of_q_agents=num_of_q_agents,
