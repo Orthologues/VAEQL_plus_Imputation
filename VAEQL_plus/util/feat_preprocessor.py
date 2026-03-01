@@ -22,6 +22,7 @@ import pandas as pd
 import torch
 from pandas import DataFrame
 from pyspark.sql import DataFrame as SparkDataFrame
+from pyspark.sql import functions as F
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScaler
 from torch import Tensor
@@ -40,8 +41,6 @@ class FeaturePreprocessor:
         self.feat_dict = feat_dict
         self.use_spark = use_spark
         if input_df is not None:
-            if use_spark and not HAS_PYSPARK:
-                raise ImportError("PySpark is not installed, but use_spark=True was requested.")
             if use_spark and not isinstance(input_df, SparkDataFrame):
                 raise TypeError("Expected a Spark DataFrame when use_spark is True")
             elif not use_spark and not isinstance(input_df, DataFrame):
@@ -183,7 +182,6 @@ class FeaturePreprocessor:
         return x, list(cols)
 
     def _preprocess_real_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        self._require_pyspark()
         sdf = self.input_df
         for c in cols:
             sdf = sdf.withColumn(c, F.col(c).cast("double"))
@@ -210,7 +208,6 @@ class FeaturePreprocessor:
         return x, list(cols)
 
     def _preprocess_pos_real_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        self._require_pyspark()
         sdf = self.input_df
         for c in cols:
             sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
@@ -234,7 +231,6 @@ class FeaturePreprocessor:
         return x, list(cols)
 
     def _preprocess_count_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        self._require_pyspark()
         sdf = self.input_df
         for c in cols:
             sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
@@ -262,8 +258,3 @@ class FeaturePreprocessor:
     @staticmethod
     def _empty_block() -> tuple[np.ndarray, List[str]]:
         return np.empty((0, 0), dtype=np.float32), []
-
-    @staticmethod
-    def _require_pyspark() -> None:
-        if not HAS_PYSPARK:
-            raise ImportError("PySpark is required for Spark preprocessing but is not installed.")

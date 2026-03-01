@@ -218,10 +218,12 @@ class VaeQlConfig(TypedDict):
     device = _resolve_device()
 
     
+    @staticmethod
     def _gt_zero(name: str, value: int | float) -> None:
         if value <= 0:
             raise ValueError(f"{name} must be > 0; got {value}.")
 
+    @staticmethod
     def _in_unit_interval(name: str, value: float, *, inclusive_zero: bool = False) -> None:
         low_ok = value >= 0 if inclusive_zero else value > 0
         if not (low_ok and value <= 1):
