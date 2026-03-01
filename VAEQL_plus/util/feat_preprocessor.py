@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Sequence, Union
+from typing import TYPE_CHECKING, Any, List, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,11 @@ from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScale
 from torch import Tensor
 
 from ..conf import FeaturesTypeDict
+
+if TYPE_CHECKING:  # pragma: no cover - for type checkers only
+    from pyspark.sql import DataFrame as SparkDataFrame
+else:  # runtime fallback when PySpark is unavailable
+    SparkDataFrame = Any  # type: ignore[misc, assignment]
 
 try:
     from pyspark.sql import DataFrame as SparkDataFrame

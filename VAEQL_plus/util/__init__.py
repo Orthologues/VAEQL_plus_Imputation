@@ -3,7 +3,7 @@ Convenience re-exports for VAEQL utility helpers with lazy loading.
 """
 
 __methods__ = ["load_dataset", "load_pandas", "load_pyspark"]
-__classes__ = ["ReplayBuffer"]
+__classes__ = ["ReplayBuffer", "FeaturePreprocessor"]
 __all__ = __methods__ + __classes__
 
 # non-essential methods to support IDE autocompletion and dir() introspection without eager loading

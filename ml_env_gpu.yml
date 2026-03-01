@@ -19,6 +19,7 @@ dependencies:
   - pip
   - numpy
   - pandas
+  - python-dateutil
   - scikit-learn
 
   # PyTorch stack (single source: conda pytorch+nvidia)
