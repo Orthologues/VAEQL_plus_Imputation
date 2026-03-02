@@ -15,16 +15,16 @@
 
 from __future__ import annotations
 
-from typing import List, Sequence, Union
+from typing import Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import torch
 from pandas import DataFrame
+from pyampute.ampute import MultivariateAmputation
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, PowerTransformer
 from torch import Tensor
 
 from ..conf import FeaturesTypeDict
@@ -35,214 +35,359 @@ class FeaturePreprocessor:
     def __init__(
         self,
         feat_dict: FeaturesTypeDict,
+        missing_rate: float,
+        missing_mechanism: str,
         input_df: Union[DataFrame, SparkDataFrame] = None,
-        use_spark: bool = False,
+        use_spark: bool = False
     ):
         self.feat_dict = feat_dict
         self.use_spark = use_spark
-        if input_df is not None:
-            if use_spark and not isinstance(input_df, SparkDataFrame):
-                raise TypeError("Expected a Spark DataFrame when use_spark is True")
-            elif not use_spark and not isinstance(input_df, DataFrame):
-                raise TypeError("Expected a pandas DataFrame when use_spark is False")
-            self.input_df = input_df
-        else:
+
+        if input_df is None:
             raise ValueError("input_df cannot be None, a DataFrame must be provided for preprocessing")
+        if use_spark and not isinstance(input_df, SparkDataFrame):
+            raise TypeError("Expected a Spark DataFrame when use_spark is True")
+        if not use_spark and not isinstance(input_df, DataFrame):
+            raise TypeError("Expected a pandas DataFrame when use_spark is False")
+        self.input_df = input_df
 
-        self.output_feature_names: List[str] = []
+        if "pos_real_val_feats" not in self.feat_dict:
+            raise KeyError("feat_dict must include mandatory key 'pos_real_val_feats'")
 
-    def preprocess(self) -> Tensor:
+        if not (0.0 < missing_rate < 1.0):
+            raise ValueError(f"missing_rate must satisfy 0 < missing_rate < 1, got {missing_rate}")
+        self.missing_rate = float(missing_rate)
+
+        mechanism = missing_mechanism.upper()
+        if mechanism not in {"MAR", "MNAR", "MCAR"}:
+            raise ValueError("missing_mechanism must be one of {'MAR', 'MNAR', 'MCAR'}")
+        self.missing_mechanism = mechanism
+
+        self.ordered_feat_names: List[str] = []
+        self.missingness_mask: np.ndarray | None = None
+
+    def preprocess(self) -> Tuple[Tensor, List[str]]:
         self._validate_columns()
 
-        blocks: List[np.ndarray] = []
-        names: List[str] = []
+        # (a) reorder by feature families + (b) encode ord/cat
+        pre_df, real_cols, pos_cols, count_cols, cat_groups = self._build_preprocessed_dataframe()
 
-        real_x, real_names = self.preprocess_real_valued_features()
-        if real_x.size > 0:
-            blocks.append(real_x)
-            names.extend(real_names)
+        # (c) ampute with pyampute and generate missingness mask
+        amputed_df, mask = self._apply_pyampute(pre_df, cat_groups)
 
-        pos_real_x, pos_real_names = self.preprocess_positive_real_valued_features()
-        if pos_real_x.size > 0:
-            blocks.append(pos_real_x)
-            names.extend(pos_real_names)
+        # Naive row-mean imputation for amputed values
+        imputed_df = self._row_mean_impute(amputed_df)
 
-        count_x, count_names = self.preprocess_count_features()
-        if count_x.size > 0:
-            blocks.append(count_x)
-            names.extend(count_names)
+        # Observed-only z-score scaling of numeric families (real/pos/count)
+        imputed_df = self._scale_numerical_with_observed_only(
+            imputed_df=imputed_df,
+            amputed_df=amputed_df,
+            mask=mask,
+            numeric_cols=real_cols + pos_cols + count_cols,
+        )
 
-        ord_x, ord_names = self.preprocess_ordinal_features()
-        if ord_x.size > 0:
-            blocks.append(ord_x)
-            names.extend(ord_names)
+        x = imputed_df.to_numpy(dtype=np.float32, copy=True)
+        self.ordered_feat_names = list(imputed_df.columns)
+        self.missingness_mask = mask.astype(np.int8)
 
-        cat_x, cat_names = self.preprocess_categorical_features()
-        if cat_x.size > 0:
-            blocks.append(cat_x)
-            names.extend(cat_names)
+        return torch.from_numpy(x), self.ordered_feat_names
 
-        if not blocks:
-            raise ValueError("No features available to preprocess.")
-
-        x = np.concatenate(blocks, axis=1).astype(np.float32, copy=False)
-        self.output_feature_names = names
-        return torch.from_numpy(x)
-
-    def preprocess_real_valued_features(self) -> tuple[np.ndarray, List[str]]:
+    # =========================================================================
+    # Wrappers (dispatch only): one method per feature family
+    # =========================================================================
+    def preprocess_real_valued_features(self) -> Tuple[DataFrame, List[str]]:
         cols = sorted(self.feat_dict.get("real_val_feats", set()))
-        return self._preprocess_real_like(cols)
-
-    def preprocess_positive_real_valued_features(self) -> tuple[np.ndarray, List[str]]:
-        cols = sorted(self.feat_dict.get("pos_real_val_feats", set()))
         if not cols:
-            return self._empty_block()
+            return pd.DataFrame(index=self._row_index()), []
+        if self.use_spark:
+            return self._preprocess_real_spark(cols)
+        return self._preprocess_real_pandas(cols)
+
+    def preprocess_positive_real_valued_features(self) -> Tuple[DataFrame, List[str]]:
+        cols = sorted(self.feat_dict["pos_real_val_feats"])
+        if not cols:
+            return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
             return self._preprocess_pos_real_spark(cols)
         return self._preprocess_pos_real_pandas(cols)
 
-    def preprocess_count_features(self) -> tuple[np.ndarray, List[str]]:
+    def preprocess_count_features(self) -> Tuple[DataFrame, List[str]]:
         cols = sorted(self.feat_dict.get("count_feats", set()))
         if not cols:
-            return self._empty_block()
+            return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
             return self._preprocess_count_spark(cols)
         return self._preprocess_count_pandas(cols)
 
-    def preprocess_ordinal_features(self) -> tuple[np.ndarray, List[str]]:
+    def preprocess_ordinal_features(self) -> Tuple[DataFrame, List[str]]:
         ord_feats = self.feat_dict.get("ord_feats", {})
         if not ord_feats:
-            return self._empty_block()
+            return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
-            pdf = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
-        else:
-            pdf = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
+            return self._preprocess_ordinal_spark(ord_feats)
+        return self._preprocess_ordinal_pandas(ord_feats)
 
-        out_blocks: List[np.ndarray] = []
-        out_names: List[str] = []
+    def preprocess_categorical_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+        cat_feats = self.feat_dict.get("cat_feats", {})
+        if not cat_feats:
+            return pd.DataFrame(index=self._row_index()), [], {}
+        if self.use_spark:
+            return self._preprocess_categorical_spark(cat_feats)
+        return self._preprocess_categorical_pandas(cat_feats)
+
+    # =========================================================================
+    # Actual preprocessing implementations (backend-specific)
+    # =========================================================================
+    # Distribution: Gaussian (real-valued features)
+    # Transform stage here: numeric coercion only; z-score is applied after amputation using observed values only.
+    def _preprocess_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        pdf = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
+        return pdf, list(cols)
+
+    def _preprocess_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        sdf = self.input_df
+        for c in cols:
+            sdf = sdf.withColumn(c, F.col(c).cast("double"))
+        pdf = sdf.select(*list(cols)).toPandas()
+        pdf = pdf.apply(pd.to_numeric, errors="coerce")
+        return pdf, list(cols)
+
+    # Distribution: Log-normal (positive real-valued features)
+    # Transform stage here: Yeo-Johnson transform; z-score is applied after amputation using observed values only.
+    def _preprocess_pos_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        pdf = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
+        out = pd.DataFrame(index=pdf.index)
+        transformer = PowerTransformer(method="yeo-johnson", standardize=False)
+        for c in cols:
+            s = pdf[c]
+            obs = s.notna()
+            if obs.sum() >= 2:
+                vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
+                tr_vals = transformer.fit_transform(vals).reshape(-1)
+                out_col = s.copy()
+                out_col.loc[obs] = tr_vals
+                out[c] = out_col
+            else:
+                out[c] = s
+        return out, list(cols)
+
+    def _preprocess_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        sdf = self.input_df
+        for c in cols:
+            sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
+        pdf = sdf.select(*list(cols)).toPandas()
+        pdf = pdf.apply(pd.to_numeric, errors="coerce")
+        return self._preprocess_pos_real_pandas(cols=list(cols)) if False else self._yeojohnson_df(pdf, cols)
+
+    # Distribution: Poisson (count features)
+    # Transform stage here: plus-one log transform; z-score is applied after amputation using observed values only.
+    def _preprocess_count_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        pdf = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
+        return np.log1p(pdf), list(cols)
+
+    def _preprocess_count_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        sdf = self.input_df
+        for c in cols:
+            sdf = sdf.withColumn(c, F.log1p(F.greatest(F.col(c).cast("double"), F.lit(0.0))))
+        pdf = sdf.select(*list(cols)).toPandas().apply(pd.to_numeric, errors="coerce")
+        return pdf, list(cols)
+
+    # Distribution: Ordinal logit-model (ordinal features)
+    # Transform stage here: unary encoding (K-1 thresholds)
+    def _preprocess_ordinal_pandas(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+        pdf = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
+        return self._unary_encode_ordinal(pdf, ord_feats)
+
+    def _preprocess_ordinal_spark(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+        pdf = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
+        return self._unary_encode_ordinal(pdf, ord_feats)
+
+    # Distribution: Categorical distribution (categorical features)
+    # Transform stage here: one-hot encoding
+    def _preprocess_categorical_pandas(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+        cols = sorted(cat_feats.keys())
+        categories = [sorted(list(cat_feats[c])) for c in cols]
+        pdf = self.input_df.loc[:, cols].copy().astype("string")
+        return self._one_hot_encode_categorical(pdf, cols, categories)
+
+    def _preprocess_categorical_spark(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+        cols = sorted(cat_feats.keys())
+        categories = [sorted(list(cat_feats[c])) for c in cols]
+        pdf = self.input_df.select(*cols).toPandas().astype("string")
+        return self._one_hot_encode_categorical(pdf, cols, categories)
+
+    # =========================================================================
+    # Amputation + Imputation + Observed-only Scaling helpers
+    # =========================================================================
+    def _apply_pyampute(self, pre_df: DataFrame, cat_groups: Dict[str, List[str]]) -> Tuple[DataFrame, np.ndarray]:
+        # pyampute expects complete input; fill pre-existing NaN column-wise before synthetic amputation.
+        complete_df = pre_df.copy()
+        for c in complete_df.columns:
+            s = complete_df[c]
+            fill = float(s.mean()) if s.notna().any() else 0.0
+            complete_df[c] = s.fillna(fill)
+
+        amputed_df = complete_df.copy()
+        amputed_cat_bases: set[str] = set()
+
+        for col in complete_df.columns:
+            base = col.split("-")[0]
+            if base in cat_groups:
+                if base in amputed_cat_bases:
+                    continue
+                vars_to_ampute = cat_groups[base]
+                amputed_cat_bases.add(base)
+            else:
+                vars_to_ampute = [col]
+
+            pattern = [{"incomplete_vars": vars_to_ampute, "mechanism": self.missing_mechanism}]
+            amputor = MultivariateAmputation(prop=self.missing_rate, patterns=pattern)
+            amp_tmp = amputor.fit_transform(complete_df)
+            amputed_df.loc[:, vars_to_ampute] = amp_tmp[vars_to_ampute].values
+
+        mask = amputed_df.isna().to_numpy(dtype=bool)
+        return amputed_df, mask
+
+    @staticmethod
+    def _row_mean_impute(amputed_df: DataFrame) -> DataFrame:
+        arr = amputed_df.to_numpy(dtype=np.float64, copy=True)
+        row_means = np.nanmean(arr, axis=1)
+        row_means = np.where(np.isnan(row_means), 0.0, row_means)
+        nan_r, nan_c = np.where(np.isnan(arr))
+        arr[nan_r, nan_c] = row_means[nan_r]
+        return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
+
+    @staticmethod
+    def _scale_numerical_with_observed_only(
+        imputed_df: DataFrame,
+        amputed_df: DataFrame,
+        mask: np.ndarray,
+        numeric_cols: Sequence[str],
+    ) -> DataFrame:
+        if not numeric_cols:
+            return imputed_df
+
+        out = imputed_df.copy()
+        col_to_idx = {c: i for i, c in enumerate(amputed_df.columns)}
+
+        for c in numeric_cols:
+            if c not in col_to_idx:
+                continue
+            idx = col_to_idx[c]
+            observed = ~mask[:, idx]
+            obs_vals = amputed_df[c].to_numpy(dtype=np.float64)[observed]
+            obs_vals = obs_vals[~np.isnan(obs_vals)]
+
+            if obs_vals.size == 0:
+                mu = 0.0
+                sigma = 1.0
+            else:
+                mu = float(obs_vals.mean())
+                sigma = float(obs_vals.std(ddof=0))
+                if sigma == 0.0:
+                    sigma = 1.0
+
+            out[c] = (out[c].astype(np.float64) - mu) / sigma
+
+        return out
+
+    # =========================================================================
+    # Shared encoding helpers
+    # =========================================================================
+    def _unary_encode_ordinal(self, pdf: DataFrame, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+        out = pd.DataFrame(index=pdf.index)
+        names: List[str] = []
+
         for feat in sorted(ord_feats.keys()):
             n_orders = int(ord_feats[feat])
             if n_orders < 2:
                 raise ValueError(f"ord_feats['{feat}'] must be >= 2")
+
             s = pd.to_numeric(pdf[feat], errors="coerce")
             observed = s.dropna()
             if not observed.empty and observed.min() >= 1 and observed.max() <= n_orders:
                 s = s - 1.0
             s = s.clip(lower=0, upper=n_orders - 1)
-            base = s.to_numpy(dtype=np.float32)
-            unary = np.stack(
-                [(base >= float(k)).astype(np.float32) for k in range(1, n_orders)],
-                axis=1,
-            )
-            unary[np.isnan(base), :] = 0.0
-            out_blocks.append(unary)
-            out_names.extend([f"{feat}__ge_{k}" for k in range(1, n_orders)])
 
-        return np.concatenate(out_blocks, axis=1), out_names
+            base = s.to_numpy(dtype=np.float64)
+            for k in range(1, n_orders):
+                name = f"{feat}-ge_{k}"
+                col = (base >= float(k)).astype(np.float64)
+                col[np.isnan(base)] = np.nan
+                out[name] = col
+                names.append(name)
 
-    def preprocess_categorical_features(self) -> tuple[np.ndarray, List[str]]:
-        cat_feats = self.feat_dict.get("cat_feats", {})
-        if not cat_feats:
-            return self._empty_block()
+        return out, names
 
-        cols = sorted(cat_feats.keys())
-        categories: List[List[str]] = [sorted(list(cat_feats[c])) for c in cols]
-
-        if self.use_spark:
-            pdf = self.input_df.select(*cols).toPandas()
-        else:
-            pdf = self.input_df.loc[:, cols].copy()
-
-        pdf = pdf.astype("string")
+    @staticmethod
+    def _one_hot_encode_categorical(
+        pdf: DataFrame,
+        cols: Sequence[str],
+        categories: List[List[str]],
+    ) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         encoder = OneHotEncoder(
             categories=categories,
             handle_unknown="ignore",
             sparse_output=False,
-            dtype=np.float32,
+            dtype=np.float64,
         )
         x = encoder.fit_transform(pdf)
 
-        out_names: List[str] = []
+        names: List[str] = []
+        groups: Dict[str, List[str]] = {}
         for c, cats in zip(cols, categories):
-            out_names.extend([f"{c}__is_{v}" for v in cats])
-        return x.astype(np.float32, copy=False), out_names
+            group_cols = [f"{c}-is_{v}" for v in cats]
+            names.extend(group_cols)
+            groups[c] = group_cols
 
-    def _preprocess_real_like(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        if not cols:
-            return self._empty_block()
-        if self.use_spark:
-            return self._preprocess_real_spark(cols)
-        return self._preprocess_real_pandas(cols)
+        out = pd.DataFrame(x, columns=names, index=pdf.index)
 
-    def _preprocess_real_pandas(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        x_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
-        imputer = SimpleImputer(strategy="mean")
-        scaler = StandardScaler()
-        x = scaler.fit_transform(imputer.fit_transform(x_df)).astype(np.float32)
-        return x, list(cols)
+        # Preserve NaN rows for categorical features (all one-hot columns become NaN if source value was missing).
+        for c, gcols in groups.items():
+            miss = pdf[c].isna().to_numpy()
+            if miss.any():
+                out.loc[miss, gcols] = np.nan
 
-    def _preprocess_real_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        sdf = self.input_df
-        for c in cols:
-            sdf = sdf.withColumn(c, F.col(c).cast("double"))
+        return out, names, groups
 
-        for c in cols:
-            stats = sdf.select(F.mean(c).alias("mu"), F.stddev_samp(c).alias("sigma")).collect()[0]
-            mu = float(stats["mu"]) if stats["mu"] is not None else 0.0
-            sigma = float(stats["sigma"]) if stats["sigma"] not in (None, 0.0) else 1.0
-            sdf = sdf.withColumn(
-                c,
-                (F.coalesce(F.col(c), F.lit(mu)) - F.lit(mu)) / F.lit(sigma),
-            )
-        pdf = sdf.select(*list(cols)).toPandas()
-        return pdf.to_numpy(dtype=np.float32), list(cols)
-
-    def _preprocess_pos_real_pandas(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        x_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
-        x_df = x_df.clip(lower=0)
-        imputer = SimpleImputer(strategy="median")
-        x_imp = imputer.fit_transform(x_df)
+    @staticmethod
+    def _yeojohnson_df(pdf: DataFrame, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        out = pd.DataFrame(index=pdf.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
-        x_tr = transformer.fit_transform(x_imp)
-        x = StandardScaler().fit_transform(x_tr).astype(np.float32)
-        return x, list(cols)
-
-    def _preprocess_pos_real_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        sdf = self.input_df
         for c in cols:
-            sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
-            mu = sdf.select(F.mean(c).alias("mu")).collect()[0]["mu"]
-            mu = float(mu) if mu is not None else 0.0
-            sdf = sdf.withColumn(c, F.log1p(F.coalesce(F.col(c), F.lit(mu))))
-            stats = sdf.select(F.mean(c).alias("mu"), F.stddev_samp(c).alias("sigma")).collect()[0]
-            m = float(stats["mu"]) if stats["mu"] is not None else 0.0
-            s = float(stats["sigma"]) if stats["sigma"] not in (None, 0.0) else 1.0
-            sdf = sdf.withColumn(c, (F.col(c) - F.lit(m)) / F.lit(s))
-        pdf = sdf.select(*list(cols)).toPandas()
-        return pdf.to_numpy(dtype=np.float32), list(cols)
+            s = pd.to_numeric(pdf[c], errors="coerce")
+            obs = s.notna()
+            if obs.sum() >= 2:
+                vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
+                tr_vals = transformer.fit_transform(vals).reshape(-1)
+                out_col = s.copy()
+                out_col.loc[obs] = tr_vals
+                out[c] = out_col
+            else:
+                out[c] = s
+        return out, list(cols)
 
-    def _preprocess_count_pandas(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        x_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
-        x_df = x_df.clip(lower=0)
-        imputer = SimpleImputer(strategy="median")
-        x_imp = imputer.fit_transform(x_df)
-        x_log = np.log1p(x_imp)
-        x = StandardScaler().fit_transform(x_log).astype(np.float32)
-        return x, list(cols)
+    # =========================================================================
+    # Structural helpers
+    # =========================================================================
+    def _build_preprocessed_dataframe(
+        self,
+    ) -> Tuple[DataFrame, List[str], List[str], List[str], Dict[str, List[str]]]:
+        real_df, real_names = self.preprocess_real_valued_features()
+        pos_df, pos_names = self.preprocess_positive_real_valued_features()
+        count_df, count_names = self.preprocess_count_features()
+        ord_df, ord_names = self.preprocess_ordinal_features()
+        cat_df, cat_names, cat_groups = self.preprocess_categorical_features()
 
-    def _preprocess_count_spark(self, cols: Sequence[str]) -> tuple[np.ndarray, List[str]]:
-        sdf = self.input_df
-        for c in cols:
-            sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
-            mu = sdf.select(F.mean(c).alias("mu")).collect()[0]["mu"]
-            mu = float(mu) if mu is not None else 0.0
-            sdf = sdf.withColumn(c, F.log1p(F.coalesce(F.col(c), F.lit(mu))))
-            stats = sdf.select(F.mean(c).alias("mu"), F.stddev_samp(c).alias("sigma")).collect()[0]
-            m = float(stats["mu"]) if stats["mu"] is not None else 0.0
-            s = float(stats["sigma"]) if stats["sigma"] not in (None, 0.0) else 1.0
-            sdf = sdf.withColumn(c, (F.col(c) - F.lit(m)) / F.lit(s))
-        pdf = sdf.select(*list(cols)).toPandas()
-        return pdf.to_numpy(dtype=np.float32), list(cols)
+        blocks = [b for b in [real_df, pos_df, count_df, ord_df, cat_df] if not b.empty]
+        if not blocks:
+            raise ValueError("No features available to preprocess.")
+
+        pre_df = pd.concat(blocks, axis=1)
+        ordered_names = real_names + pos_names + count_names + ord_names + cat_names
+        pre_df = pre_df.loc[:, ordered_names]
+
+        return pre_df, real_names, pos_names, count_names, cat_groups
 
     def _validate_columns(self) -> None:
         if self.use_spark:
@@ -255,6 +400,7 @@ class FeaturePreprocessor:
         if missing:
             raise KeyError(f"Input DataFrame is missing required feature columns: {missing}")
 
-    @staticmethod
-    def _empty_block() -> tuple[np.ndarray, List[str]]:
-        return np.empty((0, 0), dtype=np.float32), []
+    def _row_index(self) -> pd.Index:
+        if self.use_spark:
+            return pd.RangeIndex(self.input_df.count())
+        return self.input_df.index

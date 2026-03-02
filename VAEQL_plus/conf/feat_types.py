@@ -13,8 +13,8 @@ class FeaturesTypeDict(TypedDict, total=False):
     
     """Dictionary type for dataset features and their types."""
     all_feats: Required[Set[str]] # Set of all feature names
-    real_val_feats: Required[Set[str]] # Set of real-valued feature names
-    pos_real_val_feats: Set[str] # Set of positive real-valued feature names
+    real_val_feats: Set[str] # Set of real-valued feature names
+    pos_real_val_feats: Required[Set[str]] # Set of positive real-valued feature names
     count_feats: Set[str] # Set of count feature names
     ord_feats: Dict[str, int] # Dictionary of ordinal feature names, keys are feature names and values are the number of orders
     cat_feats: Dict[str, Set[str]] # Dictionary of categorical feature names, keys are feature names and values are the possible categories
@@ -31,7 +31,7 @@ class FeaturesTypeDict(TypedDict, total=False):
             json_obj = json.load(f)
 
         # required keys
-        for key in ("all_feats", "real_val_feats"):
+        for key in ("all_feats", "pos_real_val_feats"):
             if key not in json_obj:
                 raise KeyError(f"Missing required key: {key}")
 
@@ -89,6 +89,7 @@ class FeaturesTypeDict(TypedDict, total=False):
             raise ValueError(
                 f"Union of feature subsets (len={len(union_feats)}) does not match all_feats (len={len(all_feats)})"
             )
+        
 
         # return to the created value loaded from a .json file
         return cls(
