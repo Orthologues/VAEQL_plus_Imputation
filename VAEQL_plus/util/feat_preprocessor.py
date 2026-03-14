@@ -35,13 +35,14 @@ class FeaturePreprocessor:
     def __init__(
         self,
         feat_dict: FeaturesTypeDict,
-        missing_rate: float,
         missing_mechanism: str,
         input_df: Union[DataFrame, SparkDataFrame] = None,
-        use_spark: bool = False
+        use_spark: bool = False,
+        missing_rate: float = 0.1,
     ):
         self.feat_dict = feat_dict
         self.use_spark = use_spark
+        self.MECHANISMS = {"MAR", "MNAR", "MCAR"}
 
         if input_df is None:
             raise ValueError("input_df cannot be None, a DataFrame must be provided for preprocessing")
@@ -54,26 +55,29 @@ class FeaturePreprocessor:
         if "pos_real_val_feats" not in self.feat_dict:
             raise KeyError("feat_dict must include mandatory key 'pos_real_val_feats'")
 
-        if not (0.0 < missing_rate < 1.0):
-            raise ValueError(f"missing_rate must satisfy 0 < missing_rate < 1, got {missing_rate}")
+        if not (0.0 < missing_rate <= 0.5):
+            raise ValueError(f"missing_rate must satisfy 0 < missing_rate <= 0.5, got {missing_rate}")
         self.missing_rate = float(missing_rate)
 
         mechanism = missing_mechanism.upper()
-        if mechanism not in {"MAR", "MNAR", "MCAR"}:
-            raise ValueError("missing_mechanism must be one of {'MAR', 'MNAR', 'MCAR'}")
+        if mechanism not in self.MECHANISMS:
+            raise ValueError(f"missing_mechanism must be one of {self.MECHANISMS.__str__()}, got {missing_mechanism}")
         self.missing_mechanism = mechanism
 
         self.ordered_feat_names: List[str] = []
         self.missingness_mask: np.ndarray | None = None
 
+
     def preprocess(self) -> Tuple[Tensor, List[str]]:
         self._validate_columns()
 
-        # (a) reorder by feature families + (b) encode ord/cat
-        pre_df, real_cols, pos_cols, count_cols, cat_groups = self._build_preprocessed_dataframe()
+        # Reorder by feature families and encode special feature types.
+        #   Ordinal and categorical groups are tracked separately for readability and downstream amputation rules.
+        build_out = self._build_preprocessed_dataframe()
+        pre_df, real_cols, pos_cols, count_cols, ord_groups, cat_groups = build_out
 
-        # (c) ampute with pyampute and generate missingness mask
-        amputed_df, mask = self._apply_pyampute(pre_df, cat_groups)
+        # ampute with pyampute and generate missingness mask
+        amputed_df, mask = self._apply_pyampute(pre_df, ord_groups, cat_groups)
 
         # Naive row-mean imputation for amputed values
         imputed_df = self._row_mean_impute(amputed_df)
@@ -92,8 +96,12 @@ class FeaturePreprocessor:
 
         return torch.from_numpy(x), self.ordered_feat_names
 
+
     # =========================================================================
     # Wrappers (dispatch only): one method per feature family
+    # Returns to:
+    ## EITHER an unchanged DataFrame based on the input DF & and an empty list, 
+    ## OR a preprocessed DataFrame and the list of column names (after encoding if applicable) for the feature family.
     # =========================================================================
     def preprocess_real_valued_features(self) -> Tuple[DataFrame, List[str]]:
         cols = sorted(self.feat_dict.get("real_val_feats", set()))
@@ -119,10 +127,10 @@ class FeaturePreprocessor:
             return self._preprocess_count_spark(cols)
         return self._preprocess_count_pandas(cols)
 
-    def preprocess_ordinal_features(self) -> Tuple[DataFrame, List[str]]:
+    def preprocess_ordinal_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         ord_feats = self.feat_dict.get("ord_feats", {})
         if not ord_feats:
-            return pd.DataFrame(index=self._row_index()), []
+            return pd.DataFrame(index=self._row_index()), [], {}
         if self.use_spark:
             return self._preprocess_ordinal_spark(ord_feats)
         return self._preprocess_ordinal_pandas(ord_feats)
@@ -134,7 +142,8 @@ class FeaturePreprocessor:
         if self.use_spark:
             return self._preprocess_categorical_spark(cat_feats)
         return self._preprocess_categorical_pandas(cat_feats)
-
+    
+    
     # =========================================================================
     # Actual preprocessing implementations (backend-specific)
     # =========================================================================
@@ -146,8 +155,8 @@ class FeaturePreprocessor:
 
     def _preprocess_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         sdf = self.input_df
-        for c in cols:
-            sdf = sdf.withColumn(c, F.col(c).cast("double"))
+        for col in cols:
+            sdf = sdf.withColumn(col, F.col(col).cast("double"))
         pdf = sdf.select(*list(cols)).toPandas()
         pdf = pdf.apply(pd.to_numeric, errors="coerce")
         return pdf, list(cols)
@@ -158,26 +167,26 @@ class FeaturePreprocessor:
         pdf = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         out = pd.DataFrame(index=pdf.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
-        for c in cols:
-            s = pdf[c]
+        for col in cols:
+            s = pdf[col]
             obs = s.notna()
             if obs.sum() >= 2:
                 vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
                 tr_vals = transformer.fit_transform(vals).reshape(-1)
                 out_col = s.copy()
                 out_col.loc[obs] = tr_vals
-                out[c] = out_col
+                out[col] = out_col
             else:
-                out[c] = s
+                out[col] = s
         return out, list(cols)
 
     def _preprocess_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         sdf = self.input_df
-        for c in cols:
-            sdf = sdf.withColumn(c, F.greatest(F.col(c).cast("double"), F.lit(0.0)))
+        for col in cols:
+            sdf = sdf.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(0.0)))
         pdf = sdf.select(*list(cols)).toPandas()
         pdf = pdf.apply(pd.to_numeric, errors="coerce")
-        return self._preprocess_pos_real_pandas(cols=list(cols)) if False else self._yeojohnson_df(pdf, cols)
+        return self._yeojohnson_df(pdf, cols)
 
     # Distribution: Poisson (count features)
     # Transform stage here: plus-one log transform; z-score is applied after amputation using observed values only.
@@ -187,18 +196,18 @@ class FeaturePreprocessor:
 
     def _preprocess_count_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         sdf = self.input_df
-        for c in cols:
-            sdf = sdf.withColumn(c, F.log1p(F.greatest(F.col(c).cast("double"), F.lit(0.0))))
+        for col in cols:
+            sdf = sdf.withColumn(col, F.log1p(F.greatest(F.col(col).cast("double"), F.lit(0.0))))
         pdf = sdf.select(*list(cols)).toPandas().apply(pd.to_numeric, errors="coerce")
         return pdf, list(cols)
 
     # Distribution: Ordinal logit-model (ordinal features)
     # Transform stage here: unary encoding (K-1 thresholds)
-    def _preprocess_ordinal_pandas(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+    def _preprocess_ordinal_pandas(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         pdf = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
         return self._unary_encode_ordinal(pdf, ord_feats)
 
-    def _preprocess_ordinal_spark(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+    def _preprocess_ordinal_spark(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         pdf = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
         return self._unary_encode_ordinal(pdf, ord_feats)
 
@@ -206,33 +215,44 @@ class FeaturePreprocessor:
     # Transform stage here: one-hot encoding
     def _preprocess_categorical_pandas(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
-        categories = [sorted(list(cat_feats[c])) for c in cols]
+        categories = [sorted(list(cat_feats[col])) for col in cols]
         pdf = self.input_df.loc[:, cols].copy().astype("string")
         return self._one_hot_encode_categorical(pdf, cols, categories)
 
     def _preprocess_categorical_spark(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
-        categories = [sorted(list(cat_feats[c])) for c in cols]
+        categories = [sorted(list(cat_feats[col])) for col in cols]
         pdf = self.input_df.select(*cols).toPandas().astype("string")
         return self._one_hot_encode_categorical(pdf, cols, categories)
 
     # =========================================================================
     # Amputation + Imputation + Observed-only Scaling helpers
     # =========================================================================
-    def _apply_pyampute(self, pre_df: DataFrame, cat_groups: Dict[str, List[str]]) -> Tuple[DataFrame, np.ndarray]:
+    def _apply_pyampute(
+        self,
+        pre_df: DataFrame,
+        ord_groups: Dict[str, List[str]],
+        cat_groups: Dict[str, List[str]],
+    ) -> Tuple[DataFrame, np.ndarray]:
         # pyampute expects complete input; fill pre-existing NaN column-wise before synthetic amputation.
         complete_df = pre_df.copy()
-        for c in complete_df.columns:
-            s = complete_df[c]
-            fill = float(s.mean()) if s.notna().any() else 0.0
-            complete_df[c] = s.fillna(fill)
+        for col in complete_df.columns:
+            series = complete_df[col]
+            fill = float(series.mean()) if series.notna().any() else 0.0
+            complete_df[col] = series.fillna(fill)
 
         amputed_df = complete_df.copy()
+        amputed_ord_bases: set[str] = set()
         amputed_cat_bases: set[str] = set()
 
         for col in complete_df.columns:
             base = col.split("-")[0]
-            if base in cat_groups:
+            if base in ord_groups:
+                if base in amputed_ord_bases:
+                    continue
+                vars_to_ampute = ord_groups[base]
+                amputed_ord_bases.add(base)
+            elif base in cat_groups:
                 if base in amputed_cat_bases:
                     continue
                 vars_to_ampute = cat_groups[base]
@@ -268,14 +288,14 @@ class FeaturePreprocessor:
             return imputed_df
 
         out = imputed_df.copy()
-        col_to_idx = {c: i for i, c in enumerate(amputed_df.columns)}
+        col_to_idx = {col: idx for idx, col in enumerate(amputed_df.columns)}
 
-        for c in numeric_cols:
-            if c not in col_to_idx:
+        for col in numeric_cols:
+            if col not in col_to_idx:
                 continue
-            idx = col_to_idx[c]
+            idx = col_to_idx[col]
             observed = ~mask[:, idx]
-            obs_vals = amputed_df[c].to_numpy(dtype=np.float64)[observed]
+            obs_vals = amputed_df[col].to_numpy(dtype=np.float64)[observed]
             obs_vals = obs_vals[~np.isnan(obs_vals)]
 
             if obs_vals.size == 0:
@@ -287,16 +307,17 @@ class FeaturePreprocessor:
                 if sigma == 0.0:
                     sigma = 1.0
 
-            out[c] = (out[c].astype(np.float64) - mu) / sigma
+            out[col] = (out[col].astype(np.float64) - mu) / sigma
 
         return out
 
     # =========================================================================
     # Shared encoding helpers
     # =========================================================================
-    def _unary_encode_ordinal(self, pdf: DataFrame, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str]]:
+    def _unary_encode_ordinal(self, pdf: DataFrame, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         out = pd.DataFrame(index=pdf.index)
         names: List[str] = []
+        groups: Dict[str, List[str]] = {}
 
         for feat in sorted(ord_feats.keys()):
             n_orders = int(ord_feats[feat])
@@ -310,14 +331,17 @@ class FeaturePreprocessor:
             s = s.clip(lower=0, upper=n_orders - 1)
 
             base = s.to_numpy(dtype=np.float64)
+            group_cols: List[str] = []
             for k in range(1, n_orders):
                 name = f"{feat}-ge_{k}"
                 col = (base >= float(k)).astype(np.float64)
                 col[np.isnan(base)] = np.nan
                 out[name] = col
                 names.append(name)
+                group_cols.append(name)
+            groups[feat] = group_cols
 
-        return out, names
+        return out, names, groups
 
     @staticmethod
     def _one_hot_encode_categorical(
@@ -335,18 +359,18 @@ class FeaturePreprocessor:
 
         names: List[str] = []
         groups: Dict[str, List[str]] = {}
-        for c, cats in zip(cols, categories):
-            group_cols = [f"{c}-is_{v}" for v in cats]
+        for col, categories_for_col in zip(cols, categories):
+            group_cols = [f"{col}-is_{value}" for value in categories_for_col]
             names.extend(group_cols)
-            groups[c] = group_cols
+            groups[col] = group_cols
 
         out = pd.DataFrame(x, columns=names, index=pdf.index)
 
         # Preserve NaN rows for categorical features (all one-hot columns become NaN if source value was missing).
-        for c, gcols in groups.items():
-            miss = pdf[c].isna().to_numpy()
+        for col, group_cols in groups.items():
+            miss = pdf[col].isna().to_numpy()
             if miss.any():
-                out.loc[miss, gcols] = np.nan
+                out.loc[miss, group_cols] = np.nan
 
         return out, names, groups
 
@@ -354,17 +378,17 @@ class FeaturePreprocessor:
     def _yeojohnson_df(pdf: DataFrame, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         out = pd.DataFrame(index=pdf.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
-        for c in cols:
-            s = pd.to_numeric(pdf[c], errors="coerce")
+        for col in cols:
+            s = pd.to_numeric(pdf[col], errors="coerce")
             obs = s.notna()
             if obs.sum() >= 2:
                 vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
                 tr_vals = transformer.fit_transform(vals).reshape(-1)
                 out_col = s.copy()
                 out_col.loc[obs] = tr_vals
-                out[c] = out_col
+                out[col] = out_col
             else:
-                out[c] = s
+                out[col] = s
         return out, list(cols)
 
     # =========================================================================
@@ -372,11 +396,11 @@ class FeaturePreprocessor:
     # =========================================================================
     def _build_preprocessed_dataframe(
         self,
-    ) -> Tuple[DataFrame, List[str], List[str], List[str], Dict[str, List[str]]]:
+    ) -> Tuple[DataFrame, List[str], List[str], List[str], Dict[str, List[str]], Dict[str, List[str]]]:
         real_df, real_names = self.preprocess_real_valued_features()
         pos_df, pos_names = self.preprocess_positive_real_valued_features()
         count_df, count_names = self.preprocess_count_features()
-        ord_df, ord_names = self.preprocess_ordinal_features()
+        ord_df, ord_names, ord_groups = self.preprocess_ordinal_features()
         cat_df, cat_names, cat_groups = self.preprocess_categorical_features()
 
         blocks = [b for b in [real_df, pos_df, count_df, ord_df, cat_df] if not b.empty]
@@ -387,7 +411,7 @@ class FeaturePreprocessor:
         ordered_names = real_names + pos_names + count_names + ord_names + cat_names
         pre_df = pre_df.loc[:, ordered_names]
 
-        return pre_df, real_names, pos_names, count_names, cat_groups
+        return pre_df, real_names, pos_names, count_names, ord_groups, cat_groups
 
     def _validate_columns(self) -> None:
         if self.use_spark:
