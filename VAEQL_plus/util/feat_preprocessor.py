@@ -285,7 +285,8 @@ class FeaturePreprocessor:
                 vars_to_ampute = [col]
 
             pattern = [{"incomplete_vars": vars_to_ampute, "mechanism": self.missing_mechanism}]
-            amputor = MultivariateAmputation(prop=self.missing_rate, patterns=pattern)
+            # Keep pyampute from re-standardizing: numerical features are already scaled upstream.
+            amputor = MultivariateAmputation(prop=self.missing_rate, patterns=pattern, std=False)
             amp_tmp = amputor.fit_transform(complete_df)
             amputed_df.loc[:, vars_to_ampute] = amp_tmp[vars_to_ampute].values
 
