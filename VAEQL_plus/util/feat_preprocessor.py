@@ -410,11 +410,12 @@ class FeaturePreprocessor:
         else:
             available = set(self.input_df.columns.tolist())
 
-        required = set(self.feat_dict.get("all_feats", set()))
+        required = set(self.feat_dict.get("all_feats", []))
         missing = sorted(list(required - available))
         if missing:
             raise KeyError(f"Input DataFrame is missing required feature columns: {missing}")
 
+    # helper to get row index for DataFrame construction from scratch in case of missing feature families; also ensures consistent row count for Spark and pandas backends.
     def _row_index(self) -> pd.Index:
         if self.use_spark:
             return pd.RangeIndex(self.input_df.count())
