@@ -31,6 +31,9 @@ from ..conf import FeaturesTypeDict
 
 
 class FeaturePreprocessor:
+    # Explicit epsilon used as the lower bound for positive-real clipping.
+    # Kept at 0.0 by default (current behavior), while still making the choice explicit.
+    POS_REAL_EPSILON: float = 0.0
 
     def __init__(
         self,
@@ -106,40 +109,40 @@ class FeaturePreprocessor:
         if not cols:
             return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
-            return self._preprocess_real_spark(cols)
-        return self._preprocess_real_pandas(cols)
+            return self._transform_real_spark(cols)
+        return self._transform_real_pandas(cols)
 
     def preprocess_positive_real_valued_features(self) -> Tuple[DataFrame, List[str]]:
         cols = sorted(self.feat_dict["pos_real_val_feats"])
         if not cols:
             return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
-            return self._preprocess_pos_real_spark(cols)
-        return self._preprocess_pos_real_pandas(cols)
+            return self._transform_pos_real_spark(cols)
+        return self._transform_pos_real_pandas(cols)
 
     def preprocess_count_features(self) -> Tuple[DataFrame, List[str]]:
         cols = sorted(self.feat_dict.get("count_feats", set()))
         if not cols:
             return pd.DataFrame(index=self._row_index()), []
         if self.use_spark:
-            return self._preprocess_count_spark(cols)
-        return self._preprocess_count_pandas(cols)
+            return self._transform_count_spark(cols)
+        return self._transform_count_pandas(cols)
 
     def preprocess_ordinal_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         ord_feats = self.feat_dict.get("ord_feats", {})
         if not ord_feats:
             return pd.DataFrame(index=self._row_index()), [], {}
         if self.use_spark:
-            return self._preprocess_ordinal_spark(ord_feats)
-        return self._preprocess_ordinal_pandas(ord_feats)
+            return self._transform_ordinal_spark(ord_feats)
+        return self._transform_ordinal_pandas(ord_feats)
 
     def preprocess_categorical_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         cat_feats = self.feat_dict.get("cat_feats", {})
         if not cat_feats:
             return pd.DataFrame(index=self._row_index()), [], {}
         if self.use_spark:
-            return self._preprocess_categorical_spark(cat_feats)
-        return self._preprocess_categorical_pandas(cat_feats)
+            return self._transform_categorical_spark(cat_feats)
+        return self._transform_categorical_pandas(cat_feats)
     
     
     # =========================================================================
@@ -147,11 +150,11 @@ class FeaturePreprocessor:
     # =========================================================================
     # Distribution: Gaussian (real-valued features)
     # Transform stage here: numeric coercion only; z-score is applied before amputation on the merged preprocessed table.
-    def _preprocess_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+    def _transform_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
         return pre_df, list(cols)
 
-    def _preprocess_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+    def _transform_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         df = self.input_df
         for col in cols:
             df = df.withColumn(col, F.col(col).cast("double"))
@@ -161,8 +164,15 @@ class FeaturePreprocessor:
 
     # Distribution: Log-normal (positive real-valued features)
     # Transform stage here: Yeo-Johnson transform; z-score is applied before amputation on the merged preprocessed table.
-    def _preprocess_pos_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
-        pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
+    # Note: Yeo-Johnson can handle zero and negative values, but we still clip with
+    # an explicit epsilon to enforce the positive real-valued feature assumption.
+    def _transform_pos_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+        pre_df = (
+            self.input_df
+            .loc[:, list(cols)]
+            .apply(pd.to_numeric, errors="coerce")
+            .clip(lower=self.POS_REAL_EPSILON)
+        )
         out = pd.DataFrame(index=pre_df.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
         for col in cols:
@@ -178,21 +188,21 @@ class FeaturePreprocessor:
                 out[col] = s
         return out, list(cols)
 
-    def _preprocess_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+    def _transform_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         df = self.input_df
         for col in cols:
-            df = df.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(0.0)))
+            df = df.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(self.POS_REAL_EPSILON)))
         pre_df = df.select(*list(cols)).toPandas()
         pre_df = pre_df.apply(pd.to_numeric, errors="coerce")
         return self._yeojohnson_df(pre_df, cols)
 
     # Distribution: Poisson (count features)
     # Transform stage here: plus-one log transform; z-score is applied before amputation on the merged preprocessed table.
-    def _preprocess_count_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+    def _transform_count_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         return np.log1p(pre_df), list(cols)
 
-    def _preprocess_count_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
+    def _transform_count_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         df = self.input_df
         for col in cols:
             df = df.withColumn(col, F.log1p(F.greatest(F.col(col).cast("double"), F.lit(0.0))))
@@ -201,23 +211,23 @@ class FeaturePreprocessor:
 
     # Distribution: Ordinal logit-model (ordinal features)
     # Transform stage here: unary encoding (K-1 thresholds)
-    def _preprocess_ordinal_pandas(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def _transform_ordinal_pandas(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         pre_df = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
         return self._unary_encode_ordinal(pre_df, ord_feats)
 
-    def _preprocess_ordinal_spark(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def _transform_ordinal_spark(self, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
         return self._unary_encode_ordinal(pre_df, ord_feats)
 
     # Distribution: Categorical distribution (categorical features)
     # Transform stage here: one-hot encoding
-    def _preprocess_categorical_pandas(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def _transform_categorical_pandas(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
         categories = [sorted(list(cat_feats[col])) for col in cols]
         pre_df = self.input_df.loc[:, cols].copy().astype("string")
         return self._one_hot_encode_categorical(pre_df, cols, categories)
 
-    def _preprocess_categorical_spark(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def _transform_categorical_spark(self, cat_feats: Dict[str, set[str]]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
         categories = [sorted(list(cat_feats[col])) for col in cols]
         pre_df = self.input_df.select(*cols).toPandas().astype("string")
