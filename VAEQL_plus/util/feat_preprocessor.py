@@ -15,6 +15,7 @@
 #########################################################
 
 
+from collections import namedtuple
 from typing import Dict, List, Sequence, Tuple, Union
 
 import numpy as np
@@ -28,6 +29,10 @@ from sklearn.preprocessing import OneHotEncoder, PowerTransformer
 from torch import Tensor
 
 from ..conf import FeaturesTypeDict
+
+
+OrderedFeature = namedtuple("OrderedFeature", ["name", "feat_type", "base_feat"])
+OrderedFeatureNames = namedtuple("OrderedFeatureNames", ["features"])
 
 
 class FeaturePreprocessor:
@@ -67,11 +72,12 @@ class FeaturePreprocessor:
             raise ValueError(f"missing_mechanism must be one of {self.MECHANISMS.__str__()}, got {missing_mechanism}")
         self.missing_mechanism = mechanism
 
-        self.ordered_feat_names: List[str] = []
+        ## CHANGELOG:_use namedtuple instead, initiate with only a named tuple
+        self.ordered_feat_names: OrderedFeatureNames = OrderedFeatureNames(features=tuple())
         self.missingness_mask: np.ndarray | None = None
 
 
-    def preprocess(self) -> Tuple[Tensor, List[str]]:
+    def preprocess(self) -> Tuple[Tensor, OrderedFeatureNames]:
         self._validate_columns()
 
         # Reorder by feature families and encode special feature types.
@@ -92,7 +98,16 @@ class FeaturePreprocessor:
         imputed_df = self._row_mean_impute(amputed_df)
 
         x = imputed_df.to_numpy(dtype=np.float32, copy=True)
-        self.ordered_feat_names = list(imputed_df.columns)
+        self.ordered_feat_names = OrderedFeatureNames(
+            features=self._build_ordered_feature_specs(
+                ordered_cols=list(imputed_df.columns),
+                real_cols=real_cols,
+                pos_cols=pos_cols,
+                count_cols=count_cols,
+                ord_groups=ord_groups,
+                cat_groups=cat_groups,
+            )
+        )
         self.missingness_mask = mask.astype(np.int8)
 
         return torch.from_numpy(x), self.ordered_feat_names
@@ -413,6 +428,36 @@ class FeaturePreprocessor:
         pre_df = pre_df.loc[:, ordered_names]
 
         return pre_df, real_names, pos_names, count_names, ord_groups, cat_groups
+
+    @staticmethod
+    def _build_ordered_feature_specs(
+        ordered_cols: Sequence[str],
+        real_cols: Sequence[str],
+        pos_cols: Sequence[str],
+        count_cols: Sequence[str],
+        ord_groups: Dict[str, List[str]],
+        cat_groups: Dict[str, List[str]],
+    ) -> Tuple[OrderedFeature, ...]:
+        type_map: Dict[str, Tuple[str, str]] = {}
+
+        for col in real_cols:
+            type_map[col] = ("real_val", col)
+        for col in pos_cols:
+            type_map[col] = ("pos_real_val", col)
+        for col in count_cols:
+            type_map[col] = ("count", col)
+        for base, group_cols in ord_groups.items():
+            for col in group_cols:
+                type_map[col] = ("ordinal", base)
+        for base, group_cols in cat_groups.items():
+            for col in group_cols:
+                type_map[col] = ("categorical", base)
+
+        specs: List[OrderedFeature] = []
+        for col in ordered_cols:
+            feat_type, base_feat = type_map.get(col, ("unknown", col))
+            specs.append(OrderedFeature(name=col, feat_type=feat_type, base_feat=base_feat))
+        return tuple(specs)
 
     def _validate_columns(self) -> None:
         if self.use_spark:
