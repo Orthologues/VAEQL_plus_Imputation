@@ -6,3 +6,5 @@ Awan_2022_*mputed_datasets/
 **/prompts/*
 !**/prompts/non_ignored/
 __pycache__/
+**/.cache/
+**/.codex

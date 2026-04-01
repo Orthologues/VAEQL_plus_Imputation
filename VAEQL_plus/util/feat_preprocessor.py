@@ -32,13 +32,9 @@ from ..conf import FeaturesTypeDict
 
 
 OrderedFeature = namedtuple("OrderedFeature", ["name", "feat_type", "base_feat"])
-OrderedFeatureNames = namedtuple("OrderedFeatureNames", ["features"])
 
 
 class FeaturePreprocessor:
-    # Explicit epsilon used as the lower bound for positive-real clipping.
-    # Kept at 0.0 by default (current behavior), while still making the choice explicit.
-    POS_REAL_EPSILON: float = 0.0
 
     def __init__(
         self,
@@ -72,12 +68,11 @@ class FeaturePreprocessor:
             raise ValueError(f"missing_mechanism must be one of {self.MECHANISMS.__str__()}, got {missing_mechanism}")
         self.missing_mechanism = mechanism
 
-        ## CHANGELOG:_use namedtuple instead, initiate with only a named tuple
-        self.ordered_feat_names: OrderedFeatureNames = OrderedFeatureNames(features=tuple())
+        self.ordered_feat_names: Tuple[OrderedFeature, ...] = tuple()
         self.missingness_mask: np.ndarray | None = None
 
 
-    def preprocess(self) -> Tuple[Tensor, OrderedFeatureNames]:
+    def preprocess(self) -> Tuple[Tensor, Tuple[OrderedFeature, ...]]:
         self._validate_columns()
 
         # Reorder by feature families and encode special feature types.
@@ -98,15 +93,13 @@ class FeaturePreprocessor:
         imputed_df = self._row_mean_impute(amputed_df)
 
         x = imputed_df.to_numpy(dtype=np.float32, copy=True)
-        self.ordered_feat_names = OrderedFeatureNames(
-            features=self._build_ordered_feature_specs(
-                ordered_cols=list(imputed_df.columns),
-                real_cols=real_cols,
-                pos_cols=pos_cols,
-                count_cols=count_cols,
-                ord_groups=ord_groups,
-                cat_groups=cat_groups,
-            )
+        self.ordered_feat_names = self._build_ordered_feature_specs(
+            ordered_cols=list(imputed_df.columns),
+            real_cols=real_cols,
+            pos_cols=pos_cols,
+            count_cols=count_cols,
+            ord_groups=ord_groups,
+            cat_groups=cat_groups,
         )
         self.missingness_mask = mask.astype(np.int8)
 
@@ -186,7 +179,7 @@ class FeaturePreprocessor:
             self.input_df
             .loc[:, list(cols)]
             .apply(pd.to_numeric, errors="coerce")
-            .clip(lower=self.POS_REAL_EPSILON)
+            .clip(lower=0)
         )
         out = pd.DataFrame(index=pre_df.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
@@ -206,7 +199,7 @@ class FeaturePreprocessor:
     def _transform_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         df = self.input_df
         for col in cols:
-            df = df.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(self.POS_REAL_EPSILON)))
+            df = df.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(0)))
         pre_df = df.select(*list(cols)).toPandas()
         pre_df = pre_df.apply(pd.to_numeric, errors="coerce")
         return self._yeojohnson_df(pre_df, cols)
