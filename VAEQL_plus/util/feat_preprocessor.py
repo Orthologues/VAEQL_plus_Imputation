@@ -25,7 +25,7 @@ from pandas import DataFrame
 from pyampute.ampute import MultivariateAmputation
 from pyspark.sql import DataFrame as SparkDataFrame
 from pyspark.sql import functions as F
-from sklearn.preprocessing import OneHotEncoder, PowerTransformer
+from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScaler
 from torch import Tensor
 
 from ..conf import FeaturesTypeDict
@@ -77,14 +77,7 @@ class FeaturePreprocessor:
 
         # Reorder by feature families and encode special feature types.
         #   Ordinal and categorical groups are tracked separately for readability and downstream amputation rules.
-        build_out = self._build_preprocessed_dataframe()
-        pre_df, real_cols, pos_cols, count_cols, ord_groups, cat_groups = build_out
-
-        # Apply z-score first on the fully transformed numeric feature families.
-        pre_df = self._zscore_numerical(
-            pre_df=pre_df,
-            numeric_cols=real_cols + pos_cols + count_cols,
-        )
+        pre_df, real_cols, pos_cols, count_cols, ord_groups, cat_groups = self._build_preprocessed_dataframe()
 
         # ampute with pyampute and generate missingness mask
         amputed_df, mask = self._apply_pyampute(pre_df, ord_groups, cat_groups)
@@ -157,21 +150,38 @@ class FeaturePreprocessor:
     # Actual preprocessing implementations (backend-specific)
     # =========================================================================
     # Distribution: Gaussian (real-valued features)
-    # Transform stage here: numeric coercion only; z-score is applied before amputation on the merged preprocessed table.
+    # Transform stage here: numeric coercion + per-column z-score scaling.
+    ## CHANGELOG: use StandardScaler of sklearn to fit and transform observed values for more robust handling of edge cases (e.g., constant columns with zero std, all-missing columns) compared to manual mean/std estimation and scaling, while preserving NaN handling and current semantics.
     def _transform_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
+        for col in cols:
+            s = pre_df[col].astype(np.float64)
+            obs = s.notna()
+            if obs.any():
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                tr_vals = scaler.fit_transform(s.loc[obs].to_numpy().reshape(-1, 1)).reshape(-1)
+                s.loc[obs] = tr_vals
+            pre_df[col] = s
         return pre_df, list(cols)
 
+    ## CHANGELOG: use StandardScaler of sklearn to fit and transform observed values for more robust handling of edge cases (e.g., constant columns with zero std, all-missing columns) compared to manual mean/std estimation and scaling, while preserving NaN handling and current semantics.
     def _transform_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
-        df = self.input_df
-        for col in cols:
-            df = df.withColumn(col, F.col(col).cast("double"))
-        pre_df = df.select(*list(cols)).toPandas()
+        pre_df = self.input_df.select(
+            *[F.col(col).cast("double").alias(col) for col in cols]
+        ).toPandas()
         pre_df = pre_df.apply(pd.to_numeric, errors="coerce")
+        for col in cols:
+            s = pre_df[col].astype(np.float64)
+            obs = s.notna()
+            if obs.any():
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                tr_vals = scaler.fit_transform(s.loc[obs].to_numpy().reshape(-1, 1)).reshape(-1)
+                s.loc[obs] = tr_vals
+            pre_df[col] = s
         return pre_df, list(cols)
 
     # Distribution: Log-normal (positive real-valued features)
-    # Transform stage here: Yeo-Johnson transform; z-score is applied before amputation on the merged preprocessed table.
+    # Transform stage here: Yeo-Johnson transform.
     # Note: Yeo-Johnson can handle zero and negative values, but we still clip with
     # an explicit epsilon to enforce the positive real-valued feature assumption.
     def _transform_pos_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
@@ -197,24 +207,22 @@ class FeaturePreprocessor:
         return out, list(cols)
 
     def _transform_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
-        df = self.input_df
-        for col in cols:
-            df = df.withColumn(col, F.greatest(F.col(col).cast("double"), F.lit(0)))
-        pre_df = df.select(*list(cols)).toPandas()
+        pre_df = self.input_df.select(
+            *[F.greatest(F.col(col).cast("double"), F.lit(0.0)).alias(col) for col in cols]
+        ).toPandas()
         pre_df = pre_df.apply(pd.to_numeric, errors="coerce")
         return self._yeojohnson_df(pre_df, cols)
 
     # Distribution: Poisson (count features)
-    # Transform stage here: plus-one log transform; z-score is applied before amputation on the merged preprocessed table.
+    # Transform stage here: plus-one log transform.
     def _transform_count_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         return np.log1p(pre_df), list(cols)
 
     def _transform_count_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
-        df = self.input_df
-        for col in cols:
-            df = df.withColumn(col, F.log1p(F.greatest(F.col(col).cast("double"), F.lit(0.0))))
-        pre_df = df.select(*list(cols)).toPandas().apply(pd.to_numeric, errors="coerce")
+        pre_df = self.input_df.select(
+            *[F.log1p(F.greatest(F.col(col).cast("double"), F.lit(0.0))).alias(col) for col in cols]
+        ).toPandas().apply(pd.to_numeric, errors="coerce")
         return pre_df, list(cols)
 
     # Distribution: Ordinal logit-model (ordinal features)
@@ -242,33 +250,8 @@ class FeaturePreprocessor:
         return self._one_hot_encode_categorical(pre_df, cols, categories)
 
     # =========================================================================
-    # Scaling + Amputation + Imputation helpers
+    # Amputation + Imputation helpers
     # =========================================================================
-    @staticmethod
-    def _zscore_numerical(pre_df: DataFrame, numeric_cols: Sequence[str]) -> DataFrame:
-        if not numeric_cols:
-            return pre_df
-
-        out = pre_df.copy()
-        for col in numeric_cols:
-            if col not in out.columns:
-                continue
-
-            col_vals = out[col].to_numpy(dtype=np.float64)
-            obs_vals = col_vals[~np.isnan(col_vals)]
-
-            if obs_vals.size == 0:
-                mu = 0.0
-                sigma = 1.0
-            else:
-                mu = float(obs_vals.mean())
-                sigma = float(obs_vals.std(ddof=0))
-                if sigma == 0.0:
-                    sigma = 1.0
-
-            out[col] = (out[col].astype(np.float64) - mu) / sigma
-
-        return out
 
     def _apply_pyampute(
         self,
@@ -412,11 +395,11 @@ class FeaturePreprocessor:
         ord_df, ord_names, ord_groups = self.preprocess_ordinal_features()
         cat_df, cat_names, cat_groups = self.preprocess_categorical_features()
 
-        blocks = [b for b in [real_df, pos_df, count_df, ord_df, cat_df] if not b.empty]
-        if not blocks:
+        dfs = [df for df in [real_df, pos_df, count_df, ord_df, cat_df] if not df.empty]
+        if not dfs:
             raise ValueError("No features available to preprocess.")
 
-        pre_df = pd.concat(blocks, axis=1)
+        pre_df = pd.concat(dfs, axis=1)
         ordered_names = real_names + pos_names + count_names + ord_names + cat_names
         pre_df = pre_df.loc[:, ordered_names]
 
