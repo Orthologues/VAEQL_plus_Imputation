@@ -151,33 +151,35 @@ class FeaturePreprocessor:
     # =========================================================================
     # Distribution: Gaussian (real-valued features)
     # Transform stage here: numeric coercion + per-column z-score scaling.
-    ## CHANGELOG: use StandardScaler of sklearn to fit and transform observed values for more robust handling of edge cases (e.g., constant columns with zero std, all-missing columns) compared to manual mean/std estimation and scaling, while preserving NaN handling and current semantics.
     def _transform_real_pandas(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce")
         for col in cols:
-            s = pre_df[col].astype(np.float64)
-            obs = s.notna()
-            if obs.any():
+            series = pre_df[col].astype(np.float32)
+            observed_mask = series.notna()
+            if observed_mask.any():
                 scaler = StandardScaler(with_mean=True, with_std=True)
-                tr_vals = scaler.fit_transform(s.loc[obs].to_numpy().reshape(-1, 1)).reshape(-1)
-                s.loc[obs] = tr_vals
-            pre_df[col] = s
+                scaled_values = scaler.fit_transform(
+                    series.loc[observed_mask].to_numpy().reshape(-1, 1)
+                ).reshape(-1).astype(np.float32, copy=False)
+                series.loc[observed_mask] = scaled_values
+            pre_df[col] = series
         return pre_df, list(cols)
 
-    ## CHANGELOG: use StandardScaler of sklearn to fit and transform observed values for more robust handling of edge cases (e.g., constant columns with zero std, all-missing columns) compared to manual mean/std estimation and scaling, while preserving NaN handling and current semantics.
     def _transform_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
         pre_df = self.input_df.select(
             *[F.col(col).cast("double").alias(col) for col in cols]
         ).toPandas()
         pre_df = pre_df.apply(pd.to_numeric, errors="coerce")
         for col in cols:
-            s = pre_df[col].astype(np.float64)
-            obs = s.notna()
-            if obs.any():
+            series = pre_df[col].astype(np.float32)
+            observed_mask = series.notna()
+            if observed_mask.any():
                 scaler = StandardScaler(with_mean=True, with_std=True)
-                tr_vals = scaler.fit_transform(s.loc[obs].to_numpy().reshape(-1, 1)).reshape(-1)
-                s.loc[obs] = tr_vals
-            pre_df[col] = s
+                scaled_values = scaler.fit_transform(
+                    series.loc[observed_mask].to_numpy().reshape(-1, 1)
+                ).reshape(-1).astype(np.float32, copy=False)
+                series.loc[observed_mask] = scaled_values
+            pre_df[col] = series
         return pre_df, list(cols)
 
     # Distribution: Log-normal (positive real-valued features)
@@ -194,16 +196,16 @@ class FeaturePreprocessor:
         out = pd.DataFrame(index=pre_df.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
         for col in cols:
-            s = pre_df[col]
-            obs = s.notna()
-            if obs.sum() >= 2:
-                vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
-                tr_vals = transformer.fit_transform(vals).reshape(-1)
-                out_col = s.copy()
-                out_col.loc[obs] = tr_vals
-                out[col] = out_col
+            series = pre_df[col]
+            observed_mask = series.notna()
+            if observed_mask.sum() >= 2:
+                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32).reshape(-1, 1)
+                transformed_values = transformer.fit_transform(observed_values).reshape(-1)
+                transformed_series = series.copy()
+                transformed_series.loc[observed_mask] = transformed_values.astype(np.float32, copy=False)
+                out[col] = transformed_series
             else:
-                out[col] = s
+                out[col] = series
         return out, list(cols)
 
     def _transform_pos_real_spark(self, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
@@ -296,7 +298,7 @@ class FeaturePreprocessor:
 
     @staticmethod
     def _row_mean_impute(amputed_df: DataFrame) -> DataFrame:
-        arr = amputed_df.to_numpy(dtype=np.float64, copy=True)
+        arr = amputed_df.to_numpy(dtype=np.float32, copy=True)
         row_means = np.nanmean(arr, axis=1)
         row_means = np.where(np.isnan(row_means), 0.0, row_means)
         nan_r, nan_c = np.where(np.isnan(arr))
@@ -322,11 +324,11 @@ class FeaturePreprocessor:
                 s = s - 1.0
             s = s.clip(lower=0, upper=n_orders - 1)
 
-            base = s.to_numpy(dtype=np.float64)
+            base = s.to_numpy(dtype=np.float32)
             group_cols: List[str] = []
             for k in range(1, n_orders):
                 name = f"{feat}-ge_{k}"
-                col = (base >= float(k)).astype(np.float64)
+                col = (base >= float(k)).astype(np.float32)
                 col[np.isnan(base)] = np.nan
                 out[name] = col
                 names.append(name)
@@ -345,7 +347,7 @@ class FeaturePreprocessor:
             categories=categories,
             handle_unknown="ignore",
             sparse_output=False,
-            dtype=np.float64,
+            dtype=np.float32,
         )
         x = encoder.fit_transform(pre_df)
 
@@ -371,16 +373,16 @@ class FeaturePreprocessor:
         out = pd.DataFrame(index=pre_df.index)
         transformer = PowerTransformer(method="yeo-johnson", standardize=False)
         for col in cols:
-            s = pd.to_numeric(pre_df[col], errors="coerce")
-            obs = s.notna()
-            if obs.sum() >= 2:
-                vals = s.loc[obs].to_numpy(dtype=np.float64).reshape(-1, 1)
-                tr_vals = transformer.fit_transform(vals).reshape(-1)
-                out_col = s.copy()
-                out_col.loc[obs] = tr_vals
-                out[col] = out_col
+            series = pd.to_numeric(pre_df[col], errors="coerce")
+            observed_mask = series.notna()
+            if observed_mask.sum() >= 2:
+                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32).reshape(-1, 1)
+                transformed_values = transformer.fit_transform(observed_values).reshape(-1)
+                transformed_series = series.copy()
+                transformed_series.loc[observed_mask] = transformed_values.astype(np.float32, copy=False)
+                out[col] = transformed_series
             else:
-                out[col] = s
+                out[col] = series
         return out, list(cols)
 
     # =========================================================================
