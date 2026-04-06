@@ -124,16 +124,16 @@ class FeaturePreprocessor:
             return pd.DataFrame(index=self._row_index()), []
         return self._transform_count(cols, spark=self.use_spark)
 
-    def preprocess_ordinal_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def preprocess_ordinal_features(self) -> Tuple[DataFrame, Dict[str, List[str]]]:
         ord_feats = self.feat_dict.get("ord_feats", {})
         if not ord_feats:
-            return pd.DataFrame(index=self._row_index()), [], {}
+            return pd.DataFrame(index=self._row_index()), {}
         return self._transform_ordinal(ord_feats, spark=self.use_spark)
 
-    def preprocess_categorical_features(self) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    def preprocess_categorical_features(self) -> Tuple[DataFrame, Dict[str, List[str]]]:
         cat_feats = self.feat_dict.get("cat_feats", {})
         if not cat_feats:
-            return pd.DataFrame(index=self._row_index()), [], {}
+            return pd.DataFrame(index=self._row_index()), {}
         return self._transform_categorical(cat_feats, spark=self.use_spark)
     
     
@@ -206,13 +206,13 @@ class FeaturePreprocessor:
 
     # Distribution: Ordinal logit-model (ordinal features)
     # Transform stage here: unary encoding (K-1 thresholds)
-    def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    # Correspoding activation function of the logit outputs: Sigmoid
+    def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         if spark:
             pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
         else:
             pre_df = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
         out = pd.DataFrame(index=pre_df.index)
-        names: List[str] = []
         groups: Dict[str, List[str]] = {}
 
         for feat in sorted(ord_feats.keys()):
@@ -233,15 +233,15 @@ class FeaturePreprocessor:
                 col = (base >= float(k)).astype(np.float32)
                 col[np.isnan(base)] = np.nan
                 out[name] = col
-                names.append(name)
                 group_cols.append(name)
             groups[feat] = group_cols
 
-        return out, names, groups
+        return out, groups
 
     # Distribution: Categorical distribution (categorical features)
     # Transform stage here: one-hot encoding
-    def _transform_categorical(self, cat_feats: Dict[str, set[str]], spark: bool = False) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
+    # Correspoding activation function of the logit outputs: Gumbel-Softmax (adds more stochasticity compared to Vanilla-Softmax, which can be beneficial for imputation tasks)
+    def _transform_categorical(self, cat_feats: Dict[str, set[str]], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
         categories = [sorted(list(cat_feats[col])) for col in cols]
         if spark:
@@ -271,7 +271,7 @@ class FeaturePreprocessor:
             if miss.any():
                 out.loc[miss, group_cols] = np.nan
 
-        return out, names, groups
+        return out, groups
 
     # =========================================================================
     # Amputation + Imputation helpers
@@ -336,8 +336,10 @@ class FeaturePreprocessor:
         real_df, real_names = self.preprocess_real_valued_features()
         pos_df, pos_names = self.preprocess_positive_real_valued_features()
         count_df, count_names = self.preprocess_count_features()
-        ord_df, ord_names, ord_groups = self.preprocess_ordinal_features()
-        cat_df, cat_names, cat_groups = self.preprocess_categorical_features()
+        ord_df, ord_groups = self.preprocess_ordinal_features()
+        cat_df, cat_groups = self.preprocess_categorical_features()
+        ord_names = list(ord_df.columns)
+        cat_names = list(cat_df.columns)
 
         dfs = [df for df in [real_df, pos_df, count_df, ord_df, cat_df] if not df.empty]
         if not dfs:
