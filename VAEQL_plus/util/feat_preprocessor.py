@@ -164,8 +164,7 @@ class FeaturePreprocessor:
 
     # Distribution: Log-normal (positive real-valued features)
     # Transform stage here: Yeo-Johnson transform.
-    # Note: Yeo-Johnson can handle zero and negative values, but we still clip with
-    # an explicit epsilon to enforce the positive real-valued feature assumption.
+    # Note: Yeo-Johnson can handle zero and negative values, but we still clip with zero to enforce the positive real-valued feature assumption.
     def _transform_pos_real(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
             pre_df = self.input_df.select(
@@ -179,7 +178,20 @@ class FeaturePreprocessor:
                 .apply(pd.to_numeric, errors="coerce")
                 .clip(lower=0)
             )
-        return self._yeojohnson_df(pre_df, cols)
+        out = pd.DataFrame(index=pre_df.index)
+        transformer = PowerTransformer(method="yeo-johnson", standardize=False)
+        for col in cols:
+            series = pd.to_numeric(pre_df[col], errors="coerce")
+            observed_mask = series.notna()
+            if observed_mask.sum() >= 2:
+                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32).reshape(-1, 1)
+                transformed_values = transformer.fit_transform(observed_values).reshape(-1)
+                transformed_series = series.copy()
+                transformed_series.loc[observed_mask] = transformed_values.astype(np.float32, copy=False)
+                out[col] = transformed_series
+            else:
+                out[col] = series
+        return out, list(cols)
 
     # Distribution: Poisson (count features)
     # Transform stage here: plus-one log transform.
@@ -192,6 +204,7 @@ class FeaturePreprocessor:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         return np.log1p(pre_df), list(cols)
 
+    ## CHANGELOG: please integrate _unary_encode_ordinal and _one_hot_encode_categorical into the respective transform methods for better encapsulation and to avoid unnecessary DataFrame copies
     # Distribution: Ordinal logit-model (ordinal features)
     # Transform stage here: unary encoding (K-1 thresholds)
     def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
@@ -199,7 +212,33 @@ class FeaturePreprocessor:
             pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
         else:
             pre_df = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
-        return self._unary_encode_ordinal(pre_df, ord_feats)
+        out = pd.DataFrame(index=pre_df.index)
+        names: List[str] = []
+        groups: Dict[str, List[str]] = {}
+
+        for feat in sorted(ord_feats.keys()):
+            n_orders = int(ord_feats[feat])
+            if n_orders < 2:
+                raise ValueError(f"ord_feats['{feat}'] must be >= 2")
+
+            series = pd.to_numeric(pre_df[feat], errors="coerce")
+            observed = series.dropna()
+            if not observed.empty and observed.min() >= 1 and observed.max() <= n_orders:
+                series = series - 1.0
+            series = series.clip(lower=0, upper=n_orders - 1)
+
+            base = series.to_numpy(dtype=np.float32)
+            group_cols: List[str] = []
+            for k in range(1, n_orders):
+                name = f"{feat}-ge_{k}"
+                col = (base >= float(k)).astype(np.float32)
+                col[np.isnan(base)] = np.nan
+                out[name] = col
+                names.append(name)
+                group_cols.append(name)
+            groups[feat] = group_cols
+
+        return out, names, groups
 
     # Distribution: Categorical distribution (categorical features)
     # Transform stage here: one-hot encoding
@@ -210,7 +249,30 @@ class FeaturePreprocessor:
             pre_df = self.input_df.select(*cols).toPandas().astype("string")
         else:
             pre_df = self.input_df.loc[:, cols].copy().astype("string")
-        return self._one_hot_encode_categorical(pre_df, cols, categories)
+        encoder = OneHotEncoder(
+            categories=categories,
+            handle_unknown="ignore",
+            sparse_output=False,
+            dtype=np.float32,
+        )
+        x = encoder.fit_transform(pre_df)
+
+        names: List[str] = []
+        groups: Dict[str, List[str]] = {}
+        for col, categories_for_col in zip(cols, categories):
+            group_cols = [f"{col}-is_{value}" for value in categories_for_col]
+            names.extend(group_cols)
+            groups[col] = group_cols
+
+        out = pd.DataFrame(x, columns=names, index=pre_df.index)
+
+        # Preserve NaN rows for categorical features (all one-hot columns become NaN if source value was missing).
+        for col, group_cols in groups.items():
+            miss = pre_df[col].isna().to_numpy()
+            if miss.any():
+                out.loc[miss, group_cols] = np.nan
+
+        return out, names, groups
 
     # =========================================================================
     # Amputation + Imputation helpers
@@ -265,86 +327,6 @@ class FeaturePreprocessor:
         nan_r, nan_c = np.where(np.isnan(arr))
         arr[nan_r, nan_c] = row_means[nan_r]
         return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
-
-    # =========================================================================
-    # Shared encoding helpers
-    # =========================================================================
-    def _unary_encode_ordinal(self, pre_df: DataFrame, ord_feats: Dict[str, int]) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
-        out = pd.DataFrame(index=pre_df.index)
-        names: List[str] = []
-        groups: Dict[str, List[str]] = {}
-
-        for feat in sorted(ord_feats.keys()):
-            n_orders = int(ord_feats[feat])
-            if n_orders < 2:
-                raise ValueError(f"ord_feats['{feat}'] must be >= 2")
-
-            s = pd.to_numeric(pre_df[feat], errors="coerce")
-            observed = s.dropna()
-            if not observed.empty and observed.min() >= 1 and observed.max() <= n_orders:
-                s = s - 1.0
-            s = s.clip(lower=0, upper=n_orders - 1)
-
-            base = s.to_numpy(dtype=np.float32)
-            group_cols: List[str] = []
-            for k in range(1, n_orders):
-                name = f"{feat}-ge_{k}"
-                col = (base >= float(k)).astype(np.float32)
-                col[np.isnan(base)] = np.nan
-                out[name] = col
-                names.append(name)
-                group_cols.append(name)
-            groups[feat] = group_cols
-
-        return out, names, groups
-
-    @staticmethod
-    def _one_hot_encode_categorical(
-        pre_df: DataFrame,
-        cols: Sequence[str],
-        categories: List[List[str]],
-    ) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
-        encoder = OneHotEncoder(
-            categories=categories,
-            handle_unknown="ignore",
-            sparse_output=False,
-            dtype=np.float32,
-        )
-        x = encoder.fit_transform(pre_df)
-
-        names: List[str] = []
-        groups: Dict[str, List[str]] = {}
-        for col, categories_for_col in zip(cols, categories):
-            group_cols = [f"{col}-is_{value}" for value in categories_for_col]
-            names.extend(group_cols)
-            groups[col] = group_cols
-
-        out = pd.DataFrame(x, columns=names, index=pre_df.index)
-
-        # Preserve NaN rows for categorical features (all one-hot columns become NaN if source value was missing).
-        for col, group_cols in groups.items():
-            miss = pre_df[col].isna().to_numpy()
-            if miss.any():
-                out.loc[miss, group_cols] = np.nan
-
-        return out, names, groups
-
-    @staticmethod
-    def _yeojohnson_df(pre_df: DataFrame, cols: Sequence[str]) -> Tuple[DataFrame, List[str]]:
-        out = pd.DataFrame(index=pre_df.index)
-        transformer = PowerTransformer(method="yeo-johnson", standardize=False)
-        for col in cols:
-            series = pd.to_numeric(pre_df[col], errors="coerce")
-            observed_mask = series.notna()
-            if observed_mask.sum() >= 2:
-                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32).reshape(-1, 1)
-                transformed_values = transformer.fit_transform(observed_values).reshape(-1)
-                transformed_series = series.copy()
-                transformed_series.loc[observed_mask] = transformed_values.astype(np.float32, copy=False)
-                out[col] = transformed_series
-            else:
-                out[col] = series
-        return out, list(cols)
 
     # =========================================================================
     # Structural helpers
