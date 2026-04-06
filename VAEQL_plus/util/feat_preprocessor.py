@@ -163,8 +163,8 @@ class FeaturePreprocessor:
         return pre_df, list(cols)
 
     # Distribution: Log-normal (positive real-valued features)
-    # Transform stage here: Yeo-Johnson transform.
-    # Note: Yeo-Johnson can handle zero and negative values, but we still clip with zero to enforce the positive real-valued feature assumption.
+    # Transform stage here: Yeo-Johnson transform with standardization.
+    # Note: Yeo-Johnson handles the stabilizing shift/shape internally; values are clipped at zero first.
     def _transform_pos_real(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
             pre_df = self.input_df.select(
@@ -179,15 +179,15 @@ class FeaturePreprocessor:
                 .clip(lower=0)
             )
         out = pd.DataFrame(index=pre_df.index)
-        transformer = PowerTransformer(method="yeo-johnson", standardize=False)
         for col in cols:
             series = pd.to_numeric(pre_df[col], errors="coerce")
             observed_mask = series.notna()
             if observed_mask.sum() >= 2:
-                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32).reshape(-1, 1)
-                transformed_values = transformer.fit_transform(observed_values).reshape(-1)
+                observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32, copy=False).reshape(-1, 1)
+                transformer = PowerTransformer(method="yeo-johnson", standardize=True)
+                transformed_values = transformer.fit_transform(observed_values).reshape(-1).astype(np.float32, copy=False)
                 transformed_series = series.copy()
-                transformed_series.loc[observed_mask] = transformed_values.astype(np.float32, copy=False)
+                transformed_series.loc[observed_mask] = transformed_values
                 out[col] = transformed_series
             else:
                 out[col] = series
@@ -204,7 +204,6 @@ class FeaturePreprocessor:
         pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         return np.log1p(pre_df), list(cols)
 
-    ## CHANGELOG: please integrate _unary_encode_ordinal and _one_hot_encode_categorical into the respective transform methods for better encapsulation and to avoid unnecessary DataFrame copies
     # Distribution: Ordinal logit-model (ordinal features)
     # Transform stage here: unary encoding (K-1 thresholds)
     def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, List[str], Dict[str, List[str]]]:
