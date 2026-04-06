@@ -157,7 +157,7 @@ class FeaturePreprocessor:
                 scaler = StandardScaler(with_mean=True, with_std=True)
                 scaled_values = scaler.fit_transform(
                     series.loc[observed_mask].to_numpy().reshape(-1, 1)
-                ).reshape(-1).astype(np.float32, copy=False)
+                ).reshape(-1).astype(np.float32)
                 series.loc[observed_mask] = scaled_values
             pre_df[col] = series
         return pre_df, list(cols)
@@ -185,7 +185,7 @@ class FeaturePreprocessor:
             if observed_mask.sum() >= 2:
                 observed_values = series.loc[observed_mask].to_numpy(dtype=np.float32, copy=False).reshape(-1, 1)
                 transformer = PowerTransformer(method="yeo-johnson", standardize=True)
-                transformed_values = transformer.fit_transform(observed_values).reshape(-1).astype(np.float32, copy=False)
+                transformed_values = transformer.fit_transform(observed_values).reshape(-1).astype(np.float32)
                 transformed_series = series.copy()
                 transformed_series.loc[observed_mask] = transformed_values
                 out[col] = transformed_series
@@ -198,10 +198,10 @@ class FeaturePreprocessor:
     def _transform_count(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
             pre_df = self.input_df.select(
-                *[F.log1p(F.greatest(F.col(col).cast("double"), F.lit(0.0))).alias(col) for col in cols]
+                *[F.greatest(F.col(col).cast("double"), F.lit(0.0)).alias(col) for col in cols]
             ).toPandas().apply(pd.to_numeric, errors="coerce")
-            return pre_df, list(cols)
-        pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
+        else:
+            pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         return np.log1p(pre_df), list(cols)
 
     # Distribution: Ordinal logit-model (ordinal features)
