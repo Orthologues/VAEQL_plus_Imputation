@@ -178,7 +178,7 @@ class FeaturePreprocessor:
                 .apply(pd.to_numeric, errors="coerce")
                 .clip(lower=0)
             )
-        out = pd.DataFrame(index=pre_df.index)
+        out_df = pd.DataFrame(index=pre_df.index)
         for col in cols:
             series = pd.to_numeric(pre_df[col], errors="coerce")
             observed_mask = series.notna()
@@ -188,10 +188,10 @@ class FeaturePreprocessor:
                 transformed_values = transformer.fit_transform(observed_values).reshape(-1).astype(np.float32)
                 transformed_series = series.copy()
                 transformed_series.loc[observed_mask] = transformed_values
-                out[col] = transformed_series
+                out_df[col] = transformed_series
             else:
-                out[col] = series
-        return out, list(cols)
+                out_df[col] = series
+        return out_df, list(cols)
 
     # Distribution: Poisson (count features)
     # Transform stage here: plus-one log transform.
@@ -212,7 +212,7 @@ class FeaturePreprocessor:
             pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
         else:
             pre_df = self.input_df.loc[:, sorted(ord_feats.keys())].copy()
-        out = pd.DataFrame(index=pre_df.index)
+        out_df = pd.DataFrame(index=pre_df.index)
         groups: Dict[str, List[str]] = {}
 
         for feat in sorted(ord_feats.keys()):
@@ -224,19 +224,18 @@ class FeaturePreprocessor:
             observed = series.dropna()
             if not observed.empty and observed.min() >= 1 and observed.max() <= n_orders:
                 series = series - 1.0
-            series = series.clip(lower=0, upper=n_orders - 1)
+            series_np = series.clip(lower=0, upper=n_orders - 1).to_numpy(dtype=np.float32)
 
-            base = series.to_numpy(dtype=np.float32)
             group_cols: List[str] = []
-            for k in range(1, n_orders):
-                name = f"{feat}-ge_{k}"
-                col = (base >= float(k)).astype(np.float32)
-                col[np.isnan(base)] = np.nan
-                out[name] = col
-                group_cols.append(name)
+            for order in range(1, n_orders):
+                col = f"{feat}-ge_{order}"
+                col_val = (series_np >= float(order)).astype(np.float32)
+                col_val[np.isnan(series_np)] = np.nan
+                out_df[col] = col_val
+                group_cols.append(col)
             groups[feat] = group_cols
 
-        return out, groups
+        return out_df, groups
 
     # Distribution: Categorical distribution (categorical features)
     # Transform stage here: one-hot encoding
