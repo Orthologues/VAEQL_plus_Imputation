@@ -47,7 +47,7 @@ class FeaturePreprocessor:
         self.feat_dict = feat_dict
         self.use_spark = use_spark
         self.MECHANISMS = {"MAR", "MNAR", "MCAR"}
-        self.MAX_MISSING_RATE = 0.8
+        self.MAX_MISSING_RATE = 0.5
 
         if input_df is None:
             raise ValueError("input_df cannot be None, a DataFrame must be provided for preprocessing")
@@ -242,7 +242,7 @@ class FeaturePreprocessor:
     # Correspoding activation function of the logit outputs: Gumbel-Softmax (adds more stochasticity compared to Vanilla-Softmax, which can be beneficial for imputation tasks)
     def _transform_categorical(self, cat_feats: Dict[str, set[str]], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
-        categories = [sorted(list(cat_feats[col])) for col in cols]
+        categories = [sorted(cat_feats[col]) for col in cols]
         if spark:
             pre_df = self.input_df.select(*cols).toPandas().astype("string")
         else:
@@ -258,24 +258,25 @@ class FeaturePreprocessor:
         names: List[str] = []
         groups: Dict[str, List[str]] = {}
         for col, categories_for_col in zip(cols, categories):
-            group_cols = [f"{col}-is_{value}" for value in categories_for_col]
-            names.extend(group_cols)
-            groups[col] = group_cols
+            col_categories = [f"{col}-is_{value}" for value in categories_for_col]
+            names.extend(col_categories)
+            groups[col] = col_categories
 
-        out = pd.DataFrame(x, columns=names, index=pre_df.index)
+        out_df = pd.DataFrame(x, columns=names, index=pre_df.index)
 
         # Preserve NaN rows for categorical features (all one-hot columns become NaN if source value was missing).
-        for col, group_cols in groups.items():
+        for col, col_categories in groups.items():
             miss = pre_df[col].isna().to_numpy()
             if miss.any():
-                out.loc[miss, group_cols] = np.nan
+                out_df.loc[miss, col_categories] = np.nan
 
-        return out, groups
+        return out_df, groups
 
     # =========================================================================
     # Amputation + Imputation helpers
     # =========================================================================
 
+    ## CHANGELOG: the variable name "complete_df" is misleading here, shall be "pyamp_input_df""
     def _apply_pyampute(
         self,
         pre_df: DataFrame,
@@ -283,17 +284,17 @@ class FeaturePreprocessor:
         cat_groups: Dict[str, List[str]],
     ) -> Tuple[DataFrame, np.ndarray]:
         # pyampute expects complete input; fill pre-existing NaN column-wise before synthetic amputation.
-        complete_df = pre_df.copy()
-        for col in complete_df.columns:
-            series = complete_df[col]
+        pyamp_input_df = pre_df.copy()
+        for col in pyamp_input_df.columns:
+            series = pyamp_input_df[col]
             fill = float(series.mean()) if series.notna().any() else 0.0
-            complete_df[col] = series.fillna(fill)
+            pyamp_input_df[col] = series.fillna(fill)
 
-        amputed_df = complete_df.copy()
+        amputed_df = pyamp_input_df.copy()
         amputed_ord_bases: set[str] = set()
         amputed_cat_bases: set[str] = set()
 
-        for col in complete_df.columns:
+        for col in pyamp_input_df.columns:
             base = col.split("-")[0]
             if base in ord_groups:
                 if base in amputed_ord_bases:
@@ -311,7 +312,7 @@ class FeaturePreprocessor:
             pattern = [{"incomplete_vars": vars_to_ampute, "mechanism": self.missing_mechanism}]
             # Keep pyampute from re-standardizing: numerical features are already scaled upstream.
             amputor = MultivariateAmputation(prop=self.missing_rate, patterns=pattern, std=False)
-            amp_tmp = amputor.fit_transform(complete_df)
+            amp_tmp = amputor.fit_transform(pyamp_input_df)
             amputed_df.loc[:, vars_to_ampute] = amp_tmp[vars_to_ampute].values
 
         mask = amputed_df.isna().to_numpy(dtype=bool)
