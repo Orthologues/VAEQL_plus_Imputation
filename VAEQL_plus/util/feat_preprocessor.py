@@ -48,7 +48,9 @@ class FeaturePreprocessor:
         missing_rate: float,
         input_df: Union[DataFrame, SparkDataFrame] = None,
         use_spark: bool = False,
-        preexisting_nan_imputation_method: str = "Mean",
+        pre_imputation_method: str = "Mean",
+        pre_imputation_max_iter: int = 5,
+        mice_num_imputations: int = 5,
     ):
         self.feat_dict = feat_dict
         self.use_spark = use_spark
@@ -75,17 +77,30 @@ class FeaturePreprocessor:
             raise ValueError(f"missing_mechanism must be one of {self.MECHANISMS.__str__()}, got {missing_mechanism}")
         self.missing_mechanism = mechanism
         
-        normalized_imputation_method = re.sub(r"[_\-\s]+", "", preexisting_nan_imputation_method.upper())
-        valid_imputation_methods = {"MEAN", "BAYESIANRIDGE", "MICE", "RANDOMFOREST"}
-        if normalized_imputation_method not in valid_imputation_methods:
-            raise ValueError(
-                "preexisting_nan_imputation_method must be one of "
-                f"{sorted(valid_imputation_methods)}, got {preexisting_nan_imputation_method}"
-            )
-        self.preexisting_nan_imputation_method = normalized_imputation_method
-
         self.ordered_feat_names: Tuple[OrderedFeature, ...] = tuple()
         self.missingness_mask: np.ndarray | None = None
+        
+        # pre-imputation parameters (three in total) in the following code snippets
+        normalized_imputation_method = re.sub(r"[_\-\s]+", "", pre_imputation_method.upper())
+        VALID_IMPUTATION_METHODS = {"MEAN", "BAYESIANRIDGE", "MICE", "RANDOMFOREST"}
+        if normalized_imputation_method not in VALID_IMPUTATION_METHODS:
+            raise ValueError(
+                "pre_imputation_method must be one of "
+                f"{sorted(VALID_IMPUTATION_METHODS)}, got {pre_imputation_method}"
+            )
+        self.pre_imputation_method = normalized_imputation_method
+        
+        if not (1 <= int(pre_imputation_max_iter) <= 20):
+            raise ValueError(
+                f"pre_imputation_max_iter must satisfy 1 <= value <= 20, got {pre_imputation_max_iter}"
+            )
+        self.pre_imputation_max_iter = int(pre_imputation_max_iter)
+        
+        if not (2 <= int(mice_num_imputations) <= 20):
+            raise ValueError(
+                f"mice_num_imputations must satisfy 2 <= value <= 20, got {mice_num_imputations}"
+            )
+        self.mice_num_imputations = int(mice_num_imputations)
 
 
     def preprocess(self) -> Tuple[Tensor, Tuple[OrderedFeature, ...]]:
@@ -102,8 +117,8 @@ class FeaturePreprocessor:
             cat_groups,
         )
 
-        # Naive row-mean imputation for amputed values
-        imputed_df = self._row_mean_impute(amputed_df)
+        # Step that uses the same options as VALID_IMPUTATION_METHODS.
+        imputed_df = self._impute_amputed_values(amputed_df, mask)
 
         x = imputed_df.to_numpy(dtype=np.float32, copy=True)
         self.ordered_feat_names = self._build_ordered_feature_specs(
@@ -302,7 +317,7 @@ class FeaturePreprocessor:
     ) -> Tuple[DataFrame, np.ndarray]:
         # pyampute expects complete input; fill pre-existing NaN column-wise before synthetic amputation.
         pyamp_input_df = pre_df.copy()
-        method = self.preexisting_nan_imputation_method
+        method = self.pre_imputation_method
 
         if method == "MEAN":
             # use mean imputation when possible and zero otherwise, for the unobserved values at each feature
@@ -311,7 +326,6 @@ class FeaturePreprocessor:
                 naive_na_imputation = float(series.mean()) if series.notna().any() else 0.0
                 pyamp_input_df[col] = series.fillna(naive_na_imputation)
         else:
-            ## CHANGELOG: too many iterations on the iterative imputers, change them so you wont waste too much time on the preprocessing step!
             # IterativeImputer requires finite values; force all-NaN columns to zeros first.
             pyamp_model_input_df = pyamp_input_df.copy()
             for col in pyamp_model_input_df.columns:
@@ -326,9 +340,10 @@ class FeaturePreprocessor:
                 imputer = IterativeImputer(
                     estimator=estimator,
                     random_state=42,
-                    max_iter=5,
+                    max_iter=self.pre_imputation_max_iter,
                     sample_posterior=False,
                 )
+                imputed_arr = imputer.fit_transform(pyamp_model_input_df)
             elif method == "RANDOMFOREST":
                 estimator = RandomForestRegressor(
                     n_estimators=100,
@@ -338,18 +353,23 @@ class FeaturePreprocessor:
                 imputer = IterativeImputer(
                     estimator=estimator,
                     random_state=42,
-                    max_iter=5,
+                    max_iter=self.pre_imputation_max_iter,
                     sample_posterior=False,
                 )
+                imputed_arr = imputer.fit_transform(pyamp_model_input_df)
+            elif method == "MICE":
+                # Multiple-imputation MICE: sample posterior multiple times and aggregate.
+                mice_imputations: List[np.ndarray] = []
+                for k in range(self.mice_num_imputations):
+                    imputer = IterativeImputer(
+                        random_state=42 + k,
+                        max_iter=self.pre_imputation_max_iter,
+                        sample_posterior=True,
+                    )
+                    mice_imputations.append(imputer.fit_transform(pyamp_model_input_df))
+                imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
             else:
-                # MICE via default BayesianRidge chained equations.
-                imputer = IterativeImputer(
-                    random_state=42,
-                    max_iter=5,
-                    sample_posterior=False,
-                )
-
-            imputed_arr = imputer.fit_transform(pyamp_model_input_df)
+                raise ValueError(f"Unsupported pre-imputation method at runtime: {method}")
             pyamp_input_df = pd.DataFrame(
                 imputed_arr,
                 columns=pyamp_input_df.columns,
@@ -405,13 +425,63 @@ class FeaturePreprocessor:
         mask[amputed_nan_mask & ~preexisting_nan_mask] = 2
         return amputed_df, mask
 
-    @staticmethod
-    def _row_mean_impute(amputed_df: DataFrame) -> DataFrame:
+    # Post-pyampute imputation for the amputed values only, using the same method as specified in self.pre_imputation_method
+    def _impute_amputed_values(self, amputed_df: DataFrame, mask: np.ndarray) -> DataFrame:
+        # mask semantics:
+        # 0 = observed after amputation
+        # 1 = pre-existing NaN values in pre_df
+        # 2 = newly amputed values from pyampute
+        amputed_only_mask = (mask == 2)
+        if not amputed_only_mask.any():
+            return amputed_df.copy()
+
+        method = self.pre_imputation_method
         arr = amputed_df.to_numpy(dtype=np.float32, copy=True)
-        row_means = np.nanmean(arr, axis=1)
-        row_means = np.where(np.isnan(row_means), 0.0, row_means)
-        nan_r, nan_c = np.where(np.isnan(arr))
-        arr[nan_r, nan_c] = row_means[nan_r]
+
+        if method == "MEAN":
+            row_means = np.nanmean(arr, axis=1)
+            row_means = np.where(np.isnan(row_means), 0.0, row_means)
+            amp_r, amp_c = np.where(amputed_only_mask)
+            arr[amp_r, amp_c] = row_means[amp_r]
+            return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
+
+        # Iterative models impute from NaNs in the full matrix.
+        if method == "BAYESIANRIDGE":
+            estimator = BayesianRidge()
+            imputer = IterativeImputer(
+                estimator=estimator,
+                random_state=42,
+                max_iter=self.pre_imputation_max_iter,
+                sample_posterior=False,
+            )
+            imputed_arr = imputer.fit_transform(arr)
+        elif method == "RANDOMFOREST":
+            estimator = RandomForestRegressor(
+                n_estimators=100,
+                random_state=42,
+                n_jobs=-1,
+            )
+            imputer = IterativeImputer(
+                estimator=estimator,
+                random_state=42,
+                max_iter=self.pre_imputation_max_iter,
+                sample_posterior=False,
+            )
+            imputed_arr = imputer.fit_transform(arr)
+        elif method == "MICE":
+            # Multiple-imputation MICE: sample posterior multiple times and aggregate.
+            mice_imputations: List[np.ndarray] = []
+            for k in range(self.mice_num_imputations):
+                imputer = IterativeImputer(
+                    random_state=42 + k,
+                    max_iter=self.pre_imputation_max_iter,
+                    sample_posterior=True,
+                )
+                mice_imputations.append(imputer.fit_transform(arr))
+            imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
+        else:
+            raise ValueError(f"Unsupported imputation method at runtime: {method}")
+        arr[amputed_only_mask] = imputed_arr[amputed_only_mask]
         return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
 
     # =========================================================================
