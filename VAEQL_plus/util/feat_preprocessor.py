@@ -82,7 +82,12 @@ class FeaturePreprocessor:
         
         # pre-imputation parameters (three in total) in the following code snippets
         normalized_imputation_method = re.sub(r"[_\-\s]+", "", pre_imputation_method.upper())
-        VALID_IMPUTATION_METHODS = {"MEAN", "BAYESIANRIDGE", "MICE", "RANDOMFOREST"}
+        # Descriptions of the methods:
+        # - MEAN: naive deterministic single imputation
+        # - BAYESIANRIDGE: deterministic single imputation with a linear model, which can capture feature correlations better than mean imputation, but may be less flexible than a non-linear model and can be sensitive to outliers.
+        # - RANDOMFOREST: deterministic single imputation with a non-linear model, which can be more flexible and accurate than the linear BayesianRidge, but also more computationally expensive.
+        # - MICE: multiple imputation by chained equations with BayesianRidge as the base estimator, stochastic by sampling from the posterior; final imputed values are aggregated by averaging across multiple imputations to stabilize the randomness.
+        VALID_IMPUTATION_METHODS = {"MEAN", "BAYESIANRIDGE", "RANDOMFOREST", "MICE"}
         if normalized_imputation_method not in VALID_IMPUTATION_METHODS:
             raise ValueError(
                 "pre_imputation_method must be one of "
