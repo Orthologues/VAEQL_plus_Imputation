@@ -307,7 +307,7 @@ class FeaturePreprocessor:
         return out_df, groups
 
     # =========================================================================
-    # Amputation + Imputation helpers
+    # Amputation + Pre-imputation helpers
     # =========================================================================
     def _apply_pyampute(
         self,
@@ -326,15 +326,6 @@ class FeaturePreprocessor:
                 naive_na_imputation = float(series.mean()) if series.notna().any() else 0.0
                 pyamp_input_df[col] = series.fillna(naive_na_imputation)
         else:
-            # IterativeImputer requires finite values; force all-NaN columns to zeros first.
-            pyamp_model_input_df = pyamp_input_df.copy()
-            for col in pyamp_model_input_df.columns:
-                series = pyamp_model_input_df[col]
-                if series.notna().any():
-                    pyamp_model_input_df[col] = series
-                else:
-                    pyamp_model_input_df[col] = 0.0
-
             if method == "BAYESIANRIDGE":
                 estimator = BayesianRidge()
                 imputer = IterativeImputer(
@@ -342,8 +333,9 @@ class FeaturePreprocessor:
                     random_state=42,
                     max_iter=self.pre_imputation_max_iter,
                     sample_posterior=False,
+                    keep_empty_features=True,
                 )
-                imputed_arr = imputer.fit_transform(pyamp_model_input_df)
+                imputed_arr = imputer.fit_transform(pyamp_input_df)
             elif method == "RANDOMFOREST":
                 estimator = RandomForestRegressor(
                     n_estimators=100,
@@ -355,18 +347,22 @@ class FeaturePreprocessor:
                     random_state=42,
                     max_iter=self.pre_imputation_max_iter,
                     sample_posterior=False,
+                    keep_empty_features=True,
                 )
-                imputed_arr = imputer.fit_transform(pyamp_model_input_df)
+                imputed_arr = imputer.fit_transform(pyamp_input_df)
             elif method == "MICE":
                 # Multiple-imputation MICE: sample posterior multiple times and aggregate.
                 mice_imputations: List[np.ndarray] = []
                 for k in range(self.mice_num_imputations):
+                    estimator = BayesianRidge()
                     imputer = IterativeImputer(
+                        estimator=estimator,
                         random_state=42 + k,
                         max_iter=self.pre_imputation_max_iter,
                         sample_posterior=True,
+                        keep_empty_features=True,
                     )
-                    mice_imputations.append(imputer.fit_transform(pyamp_model_input_df))
+                    mice_imputations.append(imputer.fit_transform(pyamp_input_df))
                 imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
             else:
                 raise ValueError(f"Unsupported pre-imputation method at runtime: {method}")
@@ -453,6 +449,7 @@ class FeaturePreprocessor:
                 random_state=42,
                 max_iter=self.pre_imputation_max_iter,
                 sample_posterior=False,
+                keep_empty_features=True,
             )
             imputed_arr = imputer.fit_transform(arr)
         elif method == "RANDOMFOREST":
@@ -466,16 +463,20 @@ class FeaturePreprocessor:
                 random_state=42,
                 max_iter=self.pre_imputation_max_iter,
                 sample_posterior=False,
+                keep_empty_features=True,
             )
             imputed_arr = imputer.fit_transform(arr)
         elif method == "MICE":
             # Multiple-imputation MICE: sample posterior multiple times and aggregate.
             mice_imputations: List[np.ndarray] = []
             for k in range(self.mice_num_imputations):
+                estimator = BayesianRidge()
                 imputer = IterativeImputer(
+                    estimator=estimator,
                     random_state=42 + k,
                     max_iter=self.pre_imputation_max_iter,
                     sample_posterior=True,
+                    keep_empty_features=True,
                 )
                 mice_imputations.append(imputer.fit_transform(arr))
             imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
