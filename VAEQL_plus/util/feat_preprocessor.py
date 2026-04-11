@@ -51,6 +51,7 @@ class FeaturePreprocessor:
         pre_imputation_method: str = "Mean",
         pre_imputation_max_iter: int = 5,
         mice_num_imputations: int = 5,
+        random_forest_n_estimators: int = 100,
     ):
         self.feat_dict = feat_dict
         self.use_spark = use_spark
@@ -106,7 +107,11 @@ class FeaturePreprocessor:
                 f"mice_num_imputations must satisfy 2 <= value <= 20, got {mice_num_imputations}"
             )
         self.mice_num_imputations = int(mice_num_imputations)
-
+        if int(random_forest_n_estimators) < 10:
+            raise ValueError(
+                f"random_forest_n_estimators must be >= 10, got {random_forest_n_estimators}"
+            )
+        self.random_forest_n_estimators = int(random_forest_n_estimators)
 
     def preprocess(self) -> Tuple[Tensor, Tuple[OrderedFeature, ...]]:
         self._validate_columns()
@@ -343,7 +348,7 @@ class FeaturePreprocessor:
                 imputed_arr = imputer.fit_transform(pyamp_input_df)
             elif method == "RANDOMFOREST":
                 estimator = RandomForestRegressor(
-                    n_estimators=100,
+                    n_estimators=self.random_forest_n_estimators,
                     random_state=42,
                     n_jobs=-1,
                 )
@@ -459,7 +464,7 @@ class FeaturePreprocessor:
             imputed_arr = imputer.fit_transform(arr)
         elif method == "RANDOMFOREST":
             estimator = RandomForestRegressor(
-                n_estimators=100,
+                n_estimators=self.random_forest_n_estimators,
                 random_state=42,
                 n_jobs=-1,
             )
