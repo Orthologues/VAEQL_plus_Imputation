@@ -136,7 +136,7 @@ class FeaturePreprocessor:
         imputed_df = self._impute_amputed_values(amputed_df, mask)
 
         x = imputed_df.to_numpy(dtype=np.float32, copy=True)
-        self.ordered_feat_names = self._build_ordered_feature_specs(
+        self.ordered_feat_names = self._build_ordered_feature_ordered_feats(
             ordered_cols=list(imputed_df.columns),
             real_cols=real_cols,
             pos_cols=pos_cols,
@@ -525,7 +525,7 @@ class FeaturePreprocessor:
         return pre_df, real_names, pos_names, count_names, ord_groups, cat_groups
 
     @staticmethod
-    def _build_ordered_feature_specs(
+    def _build_ordered_feature_ordered_feats(
         ordered_cols: Sequence[str],
         real_cols: Sequence[str],
         pos_cols: Sequence[str],
@@ -541,18 +541,20 @@ class FeaturePreprocessor:
             type_map[col] = ("pos_real_val", col)
         for col in count_cols:
             type_map[col] = ("count", col)
-        for base, colgroups in ord_groups.items():
-            for col in colgroups:
-                type_map[col] = ("ordinal", base)
-        for base, colgroups in cat_groups.items():
-            for col in colgroups:
-                type_map[col] = ("categorical", base)
+        for col, colgroups in ord_groups.items():
+            for sub_col in colgroups:
+                type_map[sub_col] = ("ordinal", col)
+        for col, colgroups in cat_groups.items():
+            for sub_col in colgroups:
+                type_map[sub_col] = ("categorical", col)
 
-        specs: List[OrderedFeature] = []
+        ordered_feats: List[OrderedFeature] = []
         for col in ordered_cols:
-            feat_type, base_feat = type_map.get(col, ("unknown", col))
-            specs.append(OrderedFeature(name=col, feat_type=feat_type, base_feat=base_feat))
-        return tuple(specs)
+            if col not in type_map:
+                raise KeyError(f"Unknown feature column in ordered_cols: {col}")
+            feat_type, base_feat = type_map[col]
+            ordered_feats.append(OrderedFeature(name=col, feat_type=feat_type, base_feat=base_feat))
+        return tuple(ordered_feats)
 
     def _validate_columns(self) -> None:
         if self.use_spark:
