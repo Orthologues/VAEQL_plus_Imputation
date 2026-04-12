@@ -15,6 +15,7 @@
 #########################################################
 
 
+import os
 import re
 from collections import namedtuple
 from typing import Dict, List, Sequence, Tuple, Union, Set, FrozenSet
@@ -112,7 +113,11 @@ class FeaturePreprocessor:
                 f"random_forest_n_estimators must be >= 10, got {random_forest_n_estimators}"
             )
         self.random_forest_n_estimators = int(random_forest_n_estimators)
+        self.random_forest_n_jobs = max(1, (os.cpu_count() or 1) - 2)
 
+    # =========================================================================
+    # Main entry point for preprocessing: validates columns, applies transformations, applies pyampute for synthetic amputation, imputes the amputed values, and returns the final preprocessed tensor and ordered feature specifications.
+    # =========================================================================
     def preprocess(self) -> Tuple[Tensor, Tuple[OrderedFeature, ...]]:
         self._validate_columns()
 
@@ -350,7 +355,7 @@ class FeaturePreprocessor:
                 estimator = RandomForestRegressor(
                     n_estimators=self.random_forest_n_estimators,
                     random_state=42,
-                    n_jobs=-1,
+                    n_jobs=self.random_forest_n_jobs,
                 )
                 imputer = IterativeImputer(
                     estimator=estimator,
@@ -466,7 +471,7 @@ class FeaturePreprocessor:
             estimator = RandomForestRegressor(
                 n_estimators=self.random_forest_n_estimators,
                 random_state=42,
-                n_jobs=-1,
+                n_jobs=self.random_forest_n_jobs,
             )
             imputer = IterativeImputer(
                 estimator=estimator,
