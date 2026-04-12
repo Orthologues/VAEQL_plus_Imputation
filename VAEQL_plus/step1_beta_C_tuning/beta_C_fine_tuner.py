@@ -31,7 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 from VAEQL_plus.util.feat_preprocessor import FeaturePreprocessor
-from VAEQL_plus.disentangledBetaVAE.BetaDVAE import iterative_halving_search, train_and_save_best_model
+from VAEQL_plus.disentangledBetaVAE import iterative_halving_search, train_and_save_best_model
 
 
 class IdentityScaler:
@@ -141,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Step1 beta/C halving CV tuner (preliminary)")
     parser.add_argument("--input_csv", type=Path, required=True, help="Raw tabular dataset CSV path")
     parser.add_argument("--feature_dict_json", type=Path, required=True, help="Feature-type JSON for FeaturesTypeDict")
-    parser.add_argument("--cv_config", type=Path, default=REPO_ROOT / "codex_CV_beta_C_fine_tuning_draft" / "cv_trainer_params.json")
+    parser.add_argument("--cv_config", type=Path, default=REPO_ROOT / "VAEQL_plus" / "disentangledBetaVAE" / "cv_trainer_params.json")
     parser.add_argument("--missing_mechanism", type=str, default="MAR", choices=["MAR", "MNAR", "MCAR"])
     parser.add_argument("--missing_rate", type=float, default=0.1)
 
