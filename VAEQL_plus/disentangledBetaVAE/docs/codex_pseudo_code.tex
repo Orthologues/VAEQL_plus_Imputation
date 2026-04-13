@@ -1,0 +1,44 @@
+\begin{algorithm}[ht]
+\footnotesize % Reduces size to fit more content
+\captionof{algorithm}{\textbf{Corner-Halving $\beta$–$C$ Search with $K$-Fold Evaluation}}
+\label{algo:betaC_corner_halving}
+\begin{algorithmic}[1] % Using [1] for line numbering every line is usually clearer
+
+  \Require{ \\
+    \begin{minipage}[t]{0.95\linewidth}
+      \textbf{Input/config:} \\
+      Data paths $\to (X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S})$ via \textsc{GetScaledData} \Comment{A feature-type specific scaling scheme at \textrm{VAEQL\_plus.util.feat\_preprocessor}} \\
+      $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$, accuracy $\alpha$ (Default $\alpha_0=0.01$) \\
+      $K$ folds, batch size $B$, learning rate $\eta$, recycles $R$, multi-imputations $M$ \\
+      Budget: $\epsilon_{\text{chunk}}, \epsilon_{\max}$; Tolerance $\tau$, patience $p$, metric $\mathfrak{m}$
+    \end{minipage}
+  }
+  \Statex
+
+  \Procedure{\textit{CornerHalvingSearch}}{$\text{config}$}
+    \State Load JSON; $(X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}) \gets \textsc{GetScaledData}(\dots)$
+    \State $(\beta_0, C_0) \gets (\beta_{\max}-\beta_{\min},\, C_{\max}-C_{\min})$; \quad $q^\star \gets \varnothing$
+    \While{$(\Delta\beta > \alpha \beta_0) \lor (\Delta C > \alpha C_0)$}
+      \State $\beta_m \gets \text{mid}(\beta); \quad C_m \gets \text{mid}(C)$
+      \State $\mathcal{Q} \gets \text{Corner points of current grid}$ 
+      \State $\mathcal{R} \gets$ \textsc{RunCandidateCVsInParallel}$(\mathcal{Q}, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
+      \State $r^\star \gets \arg\min_{r \in \mathcal{R}} r.\text{score}$; \quad $q^\star \gets r^\star.q$
+      \State \textbf{Update grid towards winning sub-grid}:
+      \State \textbf{if} $q^\star=(\beta_{\min},C_{\min})$ \textbf{then} $(\beta_{\max},C_{\max}) \gets (\beta_m,C_m)$
+      \State \textbf{else if} ... \Comment{Shortened logic to save horizontal space}
+    \EndWhile
+    \State \textsc{TrainVAEQLwithBestParams}$(q^\star.\beta, q^\star.C, \dots)$
+  \EndProcedure
+
+  \Statex
+  \Procedure{\textit{RunCandidateCV}}{$\beta, C, \text{config}$}
+    \For{$k = 0$ \textbf{to} $K-1$}
+      \State $(X_{\text{tr}}, X_{\text{vl}}^{\text{ms}}, X_{\text{vl}}^{\text{fl}}, \text{idx}) \gets \textsc{Split}(k)$ \Comment{Abbreviated variable names}
+      \State Train in chunks until $\epsilon_{\max}$ or early-stop via $\mathfrak{m}$ with $\tau, p$
+      \State $m \gets \textsc{EvaluateModel}(VAE, X_{\text{val}}, \dots, \mathcal{S}, R, M)$
+      \State \textsc{SaveResults}$(m, \beta, C)$
+    \EndFor
+    \State \Return mean fold metric as candidate score
+  \EndProcedure
+\end{algorithmic}
+\end{algorithm}
