@@ -140,14 +140,11 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         feat_type_dict: FeaturesTypeDict,
         lr: float,
         use_adam: bool,
-        num_feat_loss_metric: str,
         optimizer: torch.optim.Optimizer,
         results_path: str = "beta_analysis.csv",
         log_imp_interval: int = 10,
     ):
         super().__init__()
-        # config validation
-        self.num_feat_loss_metric = self._normalize_num_feat_loss_metric(num_feat_loss_metric)
         # model and training params
         self.model = model
         self.beta = float(beta)
@@ -196,7 +193,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             gmm_prior=self.model.get_gmm_prior_params(),
             feat_type_dict=self.feat_type_dict,
             obs_mask=obs_mask,
-            num_feat_loss_metric=self.num_feat_loss_metric,
         )
         self.last_loss = float(loss_output.total.detach().item())
         self.last_recon = float(loss_output.recon_loss.detach().item())
@@ -230,16 +226,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         module.log("train_kl_mean", loss_output.kl_mean, prog_bar=False, on_step=log_on_step, on_epoch=True)
         module.log("train_kl_disc_mean", loss_output.kl_disc_mean, prog_bar=False, on_step=log_on_step, on_epoch=True)
         module.log("train_kl_cont_mean", loss_output.kl_cont_mean, prog_bar=False, on_step=log_on_step, on_epoch=True)
-
-    @staticmethod
-    def _normalize_num_feat_loss_metric(num_feat_loss_metric: str) -> str:
-        normalized = re.sub(r"[_-\.\s]+", "", str(num_feat_loss_metric).upper())
-        if normalized in {"RMSE", "MAE"}:
-            return normalized
-        raise ValueError(
-            "num_feat_loss_metric must resolve to 'RMSE' or 'MAE', "
-            f"got {num_feat_loss_metric!r}"
-        )
 
     @staticmethod
     def save_results(
@@ -576,7 +562,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         capacity_C: float,
         device: torch.device,
         feat_type_dict: FeaturesTypeDict,
-        num_feat_loss_metric: str,
         # We expect the cohort sizes of the to-be-imputed clinical datasets to range between circa 3K-30K, therefore, 
         # a batch size of 128 should be reasonable for stable training without out of memory (OOM) on a single GPU; 
         # this can be tuned if needed
@@ -597,7 +582,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             feat_type_dict=feat_type_dict,
             lr=float(lr),
             use_adam=bool(use_adam),
-            num_feat_loss_metric=num_feat_loss_metric,
             optimizer=optimizer,
         )
         lightning_mod.to(device)
@@ -637,7 +621,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         capacity_C: float,
         device: torch.device,
         feat_type_dict: FeaturesTypeDict,
-        num_feat_loss_metric: str,
         batch_size: int,
         start_epoch: int,
         epochs_between_evals: int,
@@ -695,7 +678,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 capacity_C=capacity_C,
                 device=device,
                 feat_type_dict=feat_type_dict,
-                num_feat_loss_metric=num_feat_loss_metric,
                 batch_size=batch_size,
             )
             completed_epochs += epochs_this_round
@@ -947,6 +929,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 hidden_dim1=hidden_dim1,
                 hidden_dim2=hidden_dim2,
                 n_gmm_components=n_gmm_components,
+                num_feat_loss_metric=num_feat_loss_metric,
             ).to(device)
             optimizer = (
                 torch.optim.Adam(model.parameters(), lr=lr)
@@ -964,7 +947,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 capacity_C=capacity_C,
                 device=device,
                 feat_type_dict=feat_type_dict,
-                num_feat_loss_metric=num_feat_loss_metric,
                 batch_size=batch_size,
                 start_epoch=start_epoch,
                 epochs_between_evals=epochs_between_evals,

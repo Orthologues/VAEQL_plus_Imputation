@@ -163,6 +163,7 @@ def train_and_save_best_model(
         hidden_dim1=config["hidden_size_1"],
         hidden_dim2=config["hidden_size_2"],
         n_gmm_components=int(config["n_gmm_components"]),
+        num_feat_loss_metric=config["num_feat_loss_metric"],
     ).to(device)
     optimizer = BetaGausMixedDVAETrainer.build_optimizer(model, lr=config["learning_rate"], use_adam=config.get("use_adam_optimizer", False))
 
@@ -174,7 +175,6 @@ def train_and_save_best_model(
         capacity_C=capacity_C,
         device=device,
         feat_type_dict=feat_type_dict,
-        num_feat_loss_metric=config["num_feat_loss_metric"],
         batch_size=config["batch_size"],
         epoch_chunk=epoch_chunk,
         final_epochs=final_epochs,

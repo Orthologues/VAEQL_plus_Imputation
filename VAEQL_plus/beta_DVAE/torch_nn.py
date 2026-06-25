@@ -78,6 +78,7 @@ class BetaGausMixedDVAE(nn.Module):
         tau_start: float = 0.5, # inferred from the preliminary SMOKE test
         tau_end: float = 0.25,
         anneal_rate: float = 0.01,
+        num_feat_loss_metric: str = "RMSE",
         device: str | torch.device | None = None,
     ):
         super().__init__()
@@ -104,6 +105,7 @@ class BetaGausMixedDVAE(nn.Module):
         self.tau_end = float(tau_end)
         self.anneal_rate = float(anneal_rate)
         self.gumbel_softmax_tau = float(tau_start)
+        self.num_feat_loss_metric = self._normalize_num_feat_loss_metric(num_feat_loss_metric)
         self.batch_size = batch_size
 
         # vanilla encoder trunk: D -> hidden
@@ -167,6 +169,16 @@ class BetaGausMixedDVAE(nn.Module):
             self.tau_start * math.exp(-self.anneal_rate * int(epoch)),
         )
         return float(tempered_tau)
+
+    @staticmethod
+    def _normalize_num_feat_loss_metric(num_feat_loss_metric: str) -> str:
+        """Normalize and validate the numeric-feature reconstruction loss metric."""
+        normalized = re.sub(r"[-_\.\s]+", "", str(num_feat_loss_metric)).upper()
+        if normalized in {"RMSE", "MAE"}:
+            return normalized
+        raise ValueError(
+            f"`num_feat_loss_metric` must be one of 'RMSE' or 'MAE', got {num_feat_loss_metric!r}"
+        )
 
     # Encoding
     def encode(self, x: torch.Tensor) -> "BetaGausMixedDVAE.EncodingOutput":
@@ -253,6 +265,8 @@ class BetaGausMixedDVAE(nn.Module):
         """Decode latent samples `z` into reconstruction logits in feature space."""
         return self.decoder(posterior_z)
 
+    # To implement "a type-aware reconstruction decoder" OR alternatively,
+    # "distribution-informed preprocessing with grouped reconstruction losses"
     def activate_reconstruction(
         self,
         recon_logits: torch.Tensor,
@@ -446,6 +460,7 @@ class BetaGausMixedDVAE(nn.Module):
     # BCE-with-logits and Categorical Cross-Entropy are numerically stable on logits,
     # while numeric features reconstruct standardized values directly.
     # `activate_reconstruction` is reserved for imputation/evaluation outputs.
+    ## TODO: Separate the numeric/binary losses properly from the ordinal/cateogrical ones by type-aware weights
     def beta_capacity_loss(
         self,
         recon_logits: torch.Tensor,
@@ -458,7 +473,6 @@ class BetaGausMixedDVAE(nn.Module):
         gmm_prior: dict,
         feat_type_dict: FeaturesTypeDict,
         obs_mask: ArrayLike,
-        num_feat_loss_metric: str, # one of RMSE or MAE
         eps: float = 1e-12,
     ) -> "BetaGausMixedDVAE.BetaCapacityLossOutput":
         """
@@ -473,7 +487,6 @@ class BetaGausMixedDVAE(nn.Module):
         - `gmm_prior`: dict with keys `logits`, `means`, `logvars` for prior parameters.
         - `feat_type_dict`: feature-type metadata including `all_feats` and type groups.
         - `obs_mask`: `(B, D)` mask; `0` denotes observed entries used for reconstruction weighting.
-        - `num_feat_loss_metric`: either `RMSE` or `MAE` for numeric-feature loss term.
         - `eps`: positive scalar for numerical stability in weighted reductions.
 
         Behavior:
@@ -506,11 +519,7 @@ class BetaGausMixedDVAE(nn.Module):
         if 0 not in obs_mask_unique_vals:
             raise ValueError("`obs_mask` must contain value 0 for reconstruction-loss weighting.")
         
-        num_feat_loss_type = re.sub(r"[-_\.\s]+", "", str(num_feat_loss_metric)).upper()
-        if num_feat_loss_type not in {"RMSE", "MAE"}:
-            raise ValueError(
-                f"`num_feat_loss_metric` must be one of 'RMSE' or 'MAE', got {num_feat_loss_metric!r}"
-            )
+        num_feat_loss_type = self.num_feat_loss_metric
         
         ord_feats = feat_type_dict.get("ord_feats", {})
         bi_feats = feat_type_dict.get("bi_feats", {})
@@ -644,6 +653,7 @@ class BetaGausMixedDVAE(nn.Module):
             capacity_C=float(capacity_C),
         )
 
+
     # ---------- these two must be implemented for MI ----------
     def impute_single(
         self,
@@ -719,7 +729,6 @@ class BetaGausMixedDVAE(nn.Module):
                 "(`X_mask` == 0) & isfinite(`X_incomplete`)."
             )
 
-
         losses_list: List[float] | None = [] if not loss_type == "BOTH" else None
         losses_mae_list: List[float] | None = [] if loss_type == "BOTH" else None
         losses_rmse_list: List[float] | None = [] if loss_type == "BOTH" else None
@@ -767,6 +776,7 @@ class BetaGausMixedDVAE(nn.Module):
             losses_mae=losses_mae_list,
             losses_rmse=losses_rmse_list,
         )
+
 
     def impute_multiple(
         self,

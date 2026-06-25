@@ -149,7 +149,6 @@ def _reconstruction_loss_and_grad(
         gmm_prior=model.get_gmm_prior_params(),
         feat_type_dict=FEAT_TYPE_DICT,
         obs_mask=torch.zeros_like(x, dtype=torch.int8),
-        num_feat_loss_metric="RMSE",
     )
     assert torch.isfinite(loss.total)
     loss.total.backward()
