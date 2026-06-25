@@ -1,0 +1,62 @@
+\begin{algorithm}[ht]
+\footnotesize
+\captionof{algorithm}{\textbf{Feature-Type-Aware Data Preprocessing with Synthetic Amputation and Targeted Imputation}}
+\label{algo:data_preprocessing}
+\begin{algorithmic}[1]
+
+  \Require{ \\
+    \begin{minipage}[t]{0.95\linewidth}
+      \textbf{Input/config:} \\
+      $\boldsymbol{D}$\Comment{clinical-trial-based tabular input dataset} \\
+      $\boldsymbol{F}$ \Comment{feature schema from \texttt{VAEQL\_plus.conf.feat\_types}: real, positive-real, count, ordinal, binary, categorical} \\
+      missing mechanism $\mu \in \{\mathrm{MCAR},\mathrm{MAR},\mathrm{MNAR}\}$, missing rate $\rho$ \\
+      pre-imputation method $\pi \in \{\mathrm{MEAN},\mathrm{BAYESIANRIDGE},\mathrm{RANDOMFOREST},\mathrm{MICE}\}$ \\
+      optional backend flag (pandas/spark), and model-specific iteration budgets
+    \end{minipage}
+  }
+  \Statex
+
+  \Procedure{\textit{PreprocessAndScaleData}}{$\mathcal{D}, \mathcal{F}, \mu, \rho, \pi$}
+    \State \textsc{ValidateInputColumns}$(\mathcal{D}, \mathcal{F}.\texttt{all\_feats})$
+    \State $X_{\text{real}} \gets$ \textsc{TransformRealValuedFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{real\_val\_feats})$ \Comment{z-score}
+    \State $X_{\text{pos}} \gets$ \textsc{TransformPositiveRealFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{pos\_real\_val\_feats})$ \Comment{Yeo--Johnson + standardize}
+    \State $X_{\text{count}} \gets$ \textsc{TransformCountFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{count\_feats})$ \Comment{$\log(1+x)$}
+    \State $(X_{\text{ord}}, G_{\text{ord}}) \gets$ \textsc{TransformOrdinalFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{ord\_feats})$ \Comment{unary encoding}
+    \State $(X_{\text{bi}}, G_{\text{bi}}) \gets$ \textsc{TransformBinaryFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{bi\_feats})$ \Comment{numeric $\{0,1\}$ or canonical labels}
+    \State $(X_{\text{cat}}, G_{\text{cat}}) \gets$ \textsc{TransformCategoricalFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{cat\_feats})$ \Comment{one-hot, preserve source NaNs}
+    \State $X_{\text{pre}} \gets \textsc{ConcatenateInFamilyOrder}(X_{\text{real}}, X_{\text{pos}}, X_{\text{count}}, X_{\text{ord}}, X_{\text{bi}}, X_{\text{cat}})$
+    \State $(X_{\text{amp}}, M) \gets$ \textsc{ApplyPyampute}$(X_{\text{pre}}, G_{\text{ord}}, G_{\text{cat}}, \mu, \rho, \pi)$
+    \State $X_{\text{imp}} \gets$ \textsc{ImputeAmputedOnly}$(X_{\text{amp}}, M, \pi)$ \Comment{impute only mask value $2$}
+    \State $\{\Phi\} \gets$ \textsc{BuildOrderedFeatureSpecs}$(X_{\text{imp}}, G_{\text{ord}}, G_{\text{bi}}, G_{\text{cat}})$
+    \State \Return $(X_0, M_0, \{\Phi\}) \coloneqq (\textsc{TensorizeFloat32}(X_{\text{imp}}), M, \{\Phi\})$
+  \EndProcedure
+
+  \Statex
+  \Procedure{\textit{ApplyPyampute}}{$X_{\text{pre}}, G_{\text{ord}}, G_{\text{cat}}, \mu, \rho, \pi$}
+    \State $X_{\text{amp-input}} \gets \textsc{PreImputeForAmputation}(X_{\text{pre}}, \pi)$ \Comment{pyampute requires complete input}
+    \State $X_{\text{amp}} \gets X_{\text{amp-input}}$
+    \State Build grouped-variable map for ordinal and categorical expansions
+    \For{each column/group $v$ in $X_{\text{amp-input}}$}
+      \State Draw synthetic missingness with pattern $\{\texttt{incomplete\_vars}=v,\texttt{mechanism}=\mu\}$ and proportion $\rho$
+      \State Apply the sampled NaN pattern to corresponding columns in $X_{\text{amp}}$
+    \EndFor
+    \State Build mask $M$ with semantics: $0$ observed, $1$ pre-existing NaN, $2$ newly amputed
+    \State \Return $(X_{\text{amp}}, M)$
+  \EndProcedure
+
+  \Statex
+  \Procedure{\textit{ImputeAmputedOnly}}{$X_{\text{amp}}, M, \pi$}
+    \State $\Omega_2 \gets \{(i,j)\mid M_{ij}=2\}$
+    \If{$\Omega_2=\varnothing$}
+      \State \Return $X_{\text{amp}}$
+    \EndIf
+    \If{$\pi=\mathrm{MEAN}$}
+      \State Fill only $\Omega_2$ by row-wise means (fallback $0$ when undefined)
+    \Else
+      \State Fit selected iterative imputer on full matrix and overwrite only $\Omega_2$
+    \EndIf
+    \State \Return imputed matrix
+  \EndProcedure
+
+\end{algorithmic}
+\end{algorithm}

@@ -1,0 +1,49 @@
+
+# Commands to reactivate this env cleanly if needed:
+#conda deactivate
+#conda env remove -n ml_env_gpu
+#conda env create -f ml_env_gpu.yml
+#conda activate ml_env_gpu
+#conda config --env --set channel_priority strict
+#python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+
+name: ml_env_gpu
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - python-dateutil
+  - scikit-learn
+
+  # PyTorch stack (single source: conda pytorch+nvidia)
+  - pytorch=2.5.*
+  - torchvision=0.20.*
+  - torchaudio=2.5.*
+  - pytorch-cuda=12.4
+
+  # Pin to avoid torch import error:
+  # undefined symbol: iJIT_NotifyEvent (seen with intel-openmp 2025.0.0)
+  - intel-openmp=2023.1.0
+
+  - pip:
+      - gensim
+      - notebook
+      - nltk
+      - pytest
+      - pyampute
+      - stable-baselines3
+      - ucimlrepo
+      - mlflow
+      - pyspark
+      - pyreadstat
+      - lightning
+      - portalocker
+      - boto3
+      - setuptools

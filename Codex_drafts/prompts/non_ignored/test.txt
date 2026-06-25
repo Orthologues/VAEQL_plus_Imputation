@@ -1,0 +1,7 @@
+model: gpt-5.1-codex-max
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: high
+reasoning summaries: auto
+session id: 019ab554-243a-7873-be89-fd2d10883a05

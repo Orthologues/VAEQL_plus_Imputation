@@ -1,0 +1,21 @@
+{
+  "beta_range": [0.1, 2.5],
+  "C_range": [0, 30],
+  "granularity": 0.01,
+  "halving_epoch_budgets": [30, 300, 30],
+  "halving_metric": "mae",
+  "convergence_tolerance": 0.001,
+  "convergence_patience": 5,
+  "use_adam_optimizer": true,
+  "k_folds": 5,
+  "learning_rate": 1e-3,
+  "batch_size": 256,
+  "recycles": 6,
+  "m": 5,
+  "results_path": "beta_analysis.csv",
+  "data_path": "path/to/complete.csv",
+  "corrupt_data_path": "path/to/masked.csv",
+  "initial_imputation_strategy": "zero",
+  "min_epochs_before_convergence": 25,
+  "model_outdir": "./trained_models"
+}

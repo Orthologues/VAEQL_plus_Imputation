@@ -1,0 +1,14 @@
+.DS_Store
+.ipynb_checkpoints/
+Synthea_*/
+Awan_2022_*mputed_datasets/
+*.lock
+**/prompts/*
+!**/prompts/non_ignored/
+__pycache__/
+**/.cache/
+**/.pytest_cache/
+**/.codex
+**/.agents
+**/*.code-workspace
+**/*_archived/
