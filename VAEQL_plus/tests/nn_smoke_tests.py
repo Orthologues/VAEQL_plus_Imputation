@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import torch
 import sys
 from pathlib import Path
@@ -219,3 +220,53 @@ def test_k_logits_backprop_with_gumbel_softmax_tau_grid() -> None:
             f"k_logits_head_grad_sum={grad_sum:.6f} "
             f"k_logits_head_grad_shape={grad_shape}"
         )
+
+
+def test_reconstruction_loss_counts_encoded_groups_once() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    encoded = model.encode(x)
+    recon_logits = torch.zeros_like(x)
+
+    loss = model.beta_capacity_loss(
+        recon_logits=recon_logits,
+        x_obs_processed=x,
+        posterior_z_component_mean=encoded.posterior_z_component_mean,
+        posterior_z_component_logvar=encoded.posterior_z_component_logvar,
+        posterior_k_probs=encoded.posterior_k_probs,
+        beta=0.0,
+        capacity_C=0.0,
+        gmm_prior=model.get_gmm_prior_params(),
+        feat_type_dict=FEAT_TYPE_DICT,
+        obs_mask=torch.zeros_like(x, dtype=torch.int8),
+    )
+
+    # Feature-level loss units:
+    # 6 numeric columns, 2 ordinal groups, 2 binary columns, 2 categorical groups.
+    # Zero logits give BCE=log(2), cat_a CE=log(3), cat_b CE=log(4), and
+    # numeric features use the same z-score-discounted RMSE rule as the model.
+    numeric_expected_terms = []
+    for col_idx in range(6):
+        target_col = x[:, col_idx]
+        z_score_disc_coef = torch.exp(-0.5 * target_col.pow(2))
+        numeric_expected_terms.append(
+            torch.sqrt((target_col.pow(2) * z_score_disc_coef).mean() + 1e-12)
+        )
+    expected = (
+        torch.stack(numeric_expected_terms).sum()
+        + 4 * math.log(2.0)
+        + math.log(3.0)
+        + math.log(4.0)
+    ) / 12
+    abs_diff = torch.abs(loss.recon_loss - expected.to(dtype=loss.recon_loss.dtype))
+    print(
+        "feature_grouped_recon_loss "
+        f"actual={float(loss.recon_loss):.6f} "
+        f"expected={float(expected):.6f} "
+        f"abs_diff={float(abs_diff):.6f}"
+    )
+    assert torch.isclose(
+        loss.recon_loss,
+        expected.to(dtype=loss.recon_loss.dtype),
+        atol=1e-6,
+    )

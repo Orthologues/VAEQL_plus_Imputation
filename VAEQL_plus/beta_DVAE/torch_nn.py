@@ -460,7 +460,6 @@ class BetaGausMixedDVAE(nn.Module):
     # BCE-with-logits and Categorical Cross-Entropy are numerically stable on logits,
     # while numeric features reconstruct standardized values directly.
     # `activate_reconstruction` is reserved for imputation/evaluation outputs.
-    ## TODO: Separate the numeric/binary losses properly from the ordinal/cateogrical ones by type-aware weights
     def beta_capacity_loss(
         self,
         recon_logits: torch.Tensor,
@@ -511,6 +510,11 @@ class BetaGausMixedDVAE(nn.Module):
             raise ValueError(
                 f"`obs_mask` must have shape {(B, D)}, got {tuple(obs_mask_t.shape)}"
             )
+        x_obs_processed_t = x_obs_processed.to(device=device, dtype=recon_logits.dtype)
+        if x_obs_processed_t.shape != recon_logits.shape:
+            raise ValueError(
+                f"`x_obs_processed` must have shape {(B, D)}, got {tuple(x_obs_processed_t.shape)}"
+            )
         obs_mask_unique_vals = set(int(v) for v in torch.unique(obs_mask_t).detach().tolist())
         if not obs_mask_unique_vals.issubset({0, 1, 2}):
             raise ValueError(
@@ -539,93 +543,91 @@ class BetaGausMixedDVAE(nn.Module):
             )
         name_to_index = {name: idx for idx, name in enumerate(ordered_feat_names)}
 
-        # used value 1 later to indicate the indeces of ORDINAL and BINARY features
-        binary_ordinal_feat_mask = torch.zeros(D, dtype=torch.bool, device=device)
+        loss_obs_mask = (obs_mask_t == 0).to(dtype=recon_logits.dtype) # True -> 1.0, False -> 0.0
+        loss_terms: List[torch.Tensor] = []
+        encoded_feature_indices: set[int] = set()
+
+        def append_binary_cross_entropy_group_loss(indices: Tuple[int, ...]) -> None:
+            idx = torch.tensor(indices, dtype=torch.long, device=device)
+            logits_grp = recon_logits.index_select(1, idx)
+            target_grp = x_obs_processed_t.index_select(1, idx).clamp(0.0, 1.0)
+            obs_grp = loss_obs_mask.index_select(1, idx).bool()
+            bce_raw = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits_grp,
+                target_grp,
+                reduction="none",
+            )
+            if bool(obs_grp.any().item()):
+                loss_terms.append(bce_raw[obs_grp].mean())
+
+        def append_cross_entropy_group_loss(indices: Tuple[int, ...]) -> None:
+            idx = torch.tensor(indices, dtype=torch.long, device=device)
+            logits_grp = recon_logits.index_select(1, idx)
+            target_grp = x_obs_processed_t.index_select(1, idx).clamp(0.0, 1.0)
+            ce_grp = -(target_grp * torch.log_softmax(logits_grp, dim=1)).sum(dim=1)
+            row_type0_mask = loss_obs_mask.index_select(1, idx).all(dim=1).bool()
+            if bool(row_type0_mask.any().item()):
+                loss_terms.append(ce_grp[row_type0_mask].mean())
+
+        # Treat each original ordinal feature as one loss unit, no matter how many
+        # unary threshold columns it expands into.
         for feat in sorted(ord_feats.keys()):
             n_orders = int(ord_feats[feat])
-            for order in range(1, n_orders):
-                col_name = f"{feat}-ge_{order}"
-                binary_ordinal_feat_mask[name_to_index[col_name]] = True
-        for feat in sorted(bi_feats.keys()):
-            if feat in name_to_index:
-                binary_ordinal_feat_mask[name_to_index[feat]] = True
-
-        cat_grp_indices: List[Tuple[int, ...]] = []
-        for feat in sorted(cat_feats.keys()):
-            one_hot_cols = [f"{feat}-is_{value}" for value in sorted(cat_feats[feat])]
-            grp_idx = tuple(name_to_index[col_name] for col_name in one_hot_cols if col_name in name_to_index)
-            cat_grp_indices.append(grp_idx)
-
-        cat_flat_indices = sorted({idx for grp in cat_grp_indices for idx in grp})
-        non_cat_indices = [idx for idx in range(D) if idx not in set(cat_flat_indices)]
-        non_cat_index_tensor = torch.tensor(non_cat_indices, dtype=torch.long, device=device)
-        loss_obs_mask = (obs_mask_t == 0).to(dtype=recon_logits.dtype) # True -> 1.0, False -> 0.0
-        recon_non_cat_vals = recon_logits.index_select(1, non_cat_index_tensor)
-        target_non_cat_vals = x_obs_processed.index_select(1, non_cat_index_tensor)
-        obs_non_cat_vals = loss_obs_mask.index_select(1, non_cat_index_tensor)
-        bi_ord_non_cat_cols_mask = binary_ordinal_feat_mask.index_select(0, non_cat_index_tensor)
-
-        bi_ord_loss = torch.tensor(0.0, device=device)
-        num_feat_loss = torch.tensor(0.0, device=device)
-
-        if recon_non_cat_vals.numel() > 0:
-            # if any binary/ordinal feature columns that shall be applied with BCE-Loss exist
-            # the ordinal features are unary/cumulative binary targets (feat-ge_1, feat-ge_2, ...), each column is a Bernoulli event
-            if bool(bi_ord_non_cat_cols_mask.any().item()):
-                bce_logits = recon_non_cat_vals[:, bi_ord_non_cat_cols_mask]
-                bce_target = target_non_cat_vals[:, bi_ord_non_cat_cols_mask].clamp(0.0, 1.0)
-                bce_raw = torch.nn.functional.binary_cross_entropy_with_logits(
-                    bce_logits, bce_target, reduction="none"
-                )
-                # Enforce type-0-only reconstruction loss entries.
-                bce_type0_mask = obs_non_cat_vals[:, bi_ord_non_cat_cols_mask].bool()
-                if bool(bce_type0_mask.any().item()):
-                    bi_ord_loss = bce_raw[bce_type0_mask].mean()
-            
-            # Categorical columns are already excluded via `logits_non_cat_vals` construction.
-            # Keep only numeric non-categorical columns (real/positive-real/count).
-            num_feat_loss_idx = torch.logical_not(binary_ordinal_feat_mask).index_select(
-                0, non_cat_index_tensor
+            grp_idx = tuple(
+                name_to_index[f"{feat}-ge_{order}"]
+                for order in range(1, n_orders)
             )
-            # if any positive real/real/count feature columns that shall be applied with z-score-discounted RMSE/MAE-Loss exist
-            if bool(num_feat_loss_idx.any().item()):
-                # Numeric heads reconstruct standardized numeric values directly; no activation is applied here.
-                abs_err_raw = torch.abs(recon_non_cat_vals[:, num_feat_loss_idx] - target_non_cat_vals[:, num_feat_loss_idx])
-                sqr_err_raw = abs_err_raw.pow(2)
-                # Enforce type-0-only reconstruction loss entries.
-                num_feat_type0_mask = obs_non_cat_vals[:, num_feat_loss_idx].bool()
-                # Statistical coefficient under standardized Gaussian assumption:
-                # larger |z| gets smaller weight via exp(-0.5 * z^2).
-                # References:
-                #   1. Bishop, Pattern Recognition and Machine Learning (2006), Gaussian density form.
-                #   2. Murphy, Machine Learning: A Probabilistic Perspective (2012), Normal distribution and quadratic exponent.
-                z_score_disc_coef = torch.exp(-0.5 * target_non_cat_vals[:, num_feat_loss_idx].pow(2))
-                if bool(num_feat_type0_mask.any().item()):
-                    mse_vals = (sqr_err_raw * z_score_disc_coef)[num_feat_type0_mask]
-                    mae_vals = (abs_err_raw * z_score_disc_coef)[num_feat_type0_mask]
-                    weighted_mse = mse_vals.mean()
-                    weighted_mae = mae_vals.mean()
-                    num_feat_loss = torch.sqrt(weighted_mse) if num_feat_loss_type == "RMSE" else weighted_mae
-        
-        non_cat_loss = bi_ord_loss + num_feat_loss
+            encoded_feature_indices.update(grp_idx)
+            append_binary_cross_entropy_group_loss(grp_idx)
 
-        cat_loss = torch.tensor(0.0, device=device)
-        cat_weight_sum = torch.tensor(0.0, device=device)
-        if len(cat_grp_indices) > 0:
-            for grp_idx in cat_grp_indices:
-                # Group-wise categorical CE over one-hot columns in the same feature group.
-                logits_grp = recon_logits[:, grp_idx]
-                target_grp = x_obs_processed[:, grp_idx].clamp(0.0, 1.0)
-                ce_grp = -(target_grp * torch.log_softmax(logits_grp, dim=1)).sum(dim=1)
-                # Enforce type-0-only rows for categorical CE: all one-hot columns in the group must be type-0.
-                row_type0_mask = loss_obs_mask[:, grp_idx].all(dim=1)
-                if bool(row_type0_mask.any().item()):
-                    cat_loss = cat_loss + ce_grp[row_type0_mask].sum()
-                    cat_weight_sum = cat_weight_sum + row_type0_mask.float().sum()
-                
-        # `cat_weight_sum` normalizes the weighted categorical CE accumulation by effective observed mass.
-        # Final reconstruction loss is a weighted average of non-categorical and categorical parts.
-        recon_loss = (non_cat_loss + cat_loss) / (1.0 + cat_weight_sum + eps)
+        # Binary features are already one original feature per encoded column.
+        for feat in sorted(bi_feats.keys()):
+            feat_idx = name_to_index[feat]
+            encoded_feature_indices.add(feat_idx)
+            append_binary_cross_entropy_group_loss((feat_idx,))
+
+        # Treat each original categorical feature as one loss unit, no matter how
+        # many one-hot category columns it expands into.
+        for feat in sorted(cat_feats.keys()):
+            grp_idx = tuple(
+                name_to_index[f"{feat}-is_{value}"]
+                for value in sorted(cat_feats[feat])
+            )
+            encoded_feature_indices.update(grp_idx)
+            append_cross_entropy_group_loss(grp_idx)
+
+        # Remaining columns are numeric features in preprocessed space. Each numeric
+        # feature contributes one loss unit.
+        numeric_indices = [
+            idx for idx in range(D) if idx not in encoded_feature_indices
+        ]
+        for idx in numeric_indices:
+            type0_mask = loss_obs_mask[:, idx].bool()
+            if not bool(type0_mask.any().item()):
+                continue
+            abs_err_raw = torch.abs(recon_logits[:, idx] - x_obs_processed_t[:, idx])
+            sqr_err_raw = abs_err_raw.pow(2)
+            # Statistical coefficient under standardized Gaussian assumption:
+            # larger |z| gets smaller weight via exp(-0.5 * z^2).
+            # References:
+            #   1. Bishop, Pattern Recognition and Machine Learning (2006), Gaussian density form.
+            #   2. Murphy, Machine Learning: A Probabilistic Perspective (2012), Normal distribution and quadratic exponent.
+            z_score_disc_coef = torch.exp(-0.5 * x_obs_processed_t[:, idx].pow(2))
+            mse_vals = (sqr_err_raw * z_score_disc_coef)[type0_mask]
+            mae_vals = (abs_err_raw * z_score_disc_coef)[type0_mask]
+            weighted_mse = mse_vals.mean()
+            weighted_mae = mae_vals.mean()
+            loss_terms.append(
+                torch.sqrt(weighted_mse + eps)
+                if num_feat_loss_type == "RMSE"
+                else weighted_mae
+            )
+
+        if not loss_terms:
+            raise ValueError("No observed feature groups were available for reconstruction loss.")
+        # Type-aware feature-level reduction: ordinal/categorical expansions are
+        # averaged inside their original feature group before this final average.
+        recon_loss = torch.stack(loss_terms).mean()
 
         kl_output = self.gmm_kl_decomposed(
             posterior_z_component_mean=posterior_z_component_mean,
