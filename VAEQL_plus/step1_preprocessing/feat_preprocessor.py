@@ -6,16 +6,20 @@
 # Description1: Feature preprocessor utilities for the VAE-Q learning imputation baseline based on the provided features in "VAEQL_plus.conf.FeaturesTypeDict".
 # Description2: This module includes the class(es) with functions for preprocessing features according to their types (real-valued, positive real-valued, count, ordinal, binary, categorical) as defined in the FeaturesTypeDict.
 # Description3: 
-# Assumed prior distributions of features for imputation after z-score scaling/one-hot encoding/unary encoding are:
+# Prior distribution assumptions of the features for imputation after z-score scaling/one-hot encoding/unary encoding are:
 # - Real-valued features: Gaussian distribution (Z-score scaling mean and std estimated from observed data)
 # - Positive real-valued features: Log-normal distribution (Yeo-Johnson log-transform, then Z-score scaling)
+#   this is not an explicit log-normal decoder likelihood.
 # - Count features: Poisson distribution (Plus-one log-transform, then Z-score scaling)
+#   this is not an explicit Poisson decoder likelihood.
 # - Ordinal features: Ordinal logit-model (unary-encoding, pre-activated transform as logits, then applied with Sigmoid activation)
+#   reconstructed with threshold-wise binary losses; 
+#   this is an ordinal-aware surrogate rather than a full ordered-logit likelihood unless monotonicity is enforced.
 # - Binary features: Bernoulli distribution (numeric-coded binaries stay in [0, 1], string-coded binaries keep canonical labels; no logit transform in preprocessing, then applied with Sigmoid activation)
 # - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochastity compared to Vanilla-Softmax)
 #########################################################
 
-
+## TODO: change monotonous ordinal transformation to threshold-based surrogates
 import os
 import re
 from collections import namedtuple

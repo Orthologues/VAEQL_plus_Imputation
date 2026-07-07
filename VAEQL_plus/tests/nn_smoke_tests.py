@@ -15,8 +15,8 @@ from VAEQL_plus.tests import NN_SMOKE_TEST_SEED
 # This deterministic smoke suite checks gradient connectivity. Larger repeated
 # sweeps can be added later for empirical temperature selection.
 
-## TODO: run 1000 randomized tests to choose between Vanilla Softmax K-logit activation / $\tau$ value for Gumbel-Softmax K-logit activation
-## summarize the mean loss/gradient sum and their STD
+RANDOMIZED_ACTIVATION_TRIALS_PER_CANDIDATE = 100
+GUMBEL_SOFTMAX_TAU_CANDIDATES = (1.0, 0.5, 0.25, 0.1, 2.0, 4.0, 10.0)
 
 FEAT_TYPE_DICT = {
     "all_feats": [
@@ -115,6 +115,28 @@ def _build_toy_batch() -> torch.Tensor:
     )
 
 
+def _build_random_toy_batch(generator: torch.Generator, batch_size: int = 4) -> torch.Tensor:
+    numeric = torch.randn(batch_size, 6, generator=generator)
+    numeric[:, 2:4] = torch.rand(batch_size, 2, generator=generator)
+    numeric[:, 4:6] = torch.poisson(
+        torch.rand(batch_size, 2, generator=generator) * 2.0
+    )
+
+    ord_a_level = torch.randint(0, 5, (batch_size, 1), generator=generator)
+    ord_a = (ord_a_level >= torch.arange(1, 5)).to(torch.float32)
+    ord_b_level = torch.randint(0, 10, (batch_size, 1), generator=generator)
+    ord_b = (ord_b_level >= torch.arange(1, 10)).to(torch.float32)
+
+    binary = torch.randint(0, 2, (batch_size, 2), generator=generator).to(torch.float32)
+
+    cat_a_idx = torch.randint(0, 3, (batch_size,), generator=generator)
+    cat_a = torch.nn.functional.one_hot(cat_a_idx, num_classes=3).to(torch.float32)
+    cat_b_idx = torch.randint(0, 4, (batch_size,), generator=generator)
+    cat_b = torch.nn.functional.one_hot(cat_b_idx, num_classes=4).to(torch.float32)
+
+    return torch.cat((numeric, ord_a, ord_b, binary, cat_a, cat_b), dim=1)
+
+
 def _build_Gumbel_Softmax_model(tau_start: float) -> BetaGausMixedDVAE:
     torch.manual_seed(NN_SMOKE_TEST_SEED)
     tau_end = max(0.05, float(tau_start) / 2.0)
@@ -176,26 +198,116 @@ def _forward_with_vanilla_softmax(
     return model.decode(z), encoded
 
 
-def test_k_logits_backprop_with_vanilla_softmax() -> None:
+def test_randomized_k_logits_activation_selection_summary() -> None:
+    input_generator = torch.Generator().manual_seed(NN_SMOKE_TEST_SEED + 10_000)
+    candidates = [("vanilla_softmax", _build_Gumbel_Softmax_model(tau_start=0.5))]
+    candidates.extend(
+        (f"gumbel_softmax_tau={tau:g}", _build_Gumbel_Softmax_model(tau_start=tau))
+        for tau in GUMBEL_SOFTMAX_TAU_CANDIDATES
+    )
+    stats = {
+        name: {"loss": [], "grad_sum": []}
+        for name, _model in candidates
+    }
+
+    trials_per_candidate = RANDOMIZED_ACTIVATION_TRIALS_PER_CANDIDATE
+    for candidate_idx, (name, model) in enumerate(candidates):
+        for trial_idx in range(trials_per_candidate):
+            x = _build_random_toy_batch(input_generator)
+            sample_seed = (
+                NN_SMOKE_TEST_SEED
+                + 20_000
+                + candidate_idx * trials_per_candidate
+                + trial_idx
+            )
+            model.zero_grad(set_to_none=True)
+            torch.manual_seed(sample_seed)
+            if name == "vanilla_softmax":
+                recon_logits, encoded = _forward_with_vanilla_softmax(model, x)
+                loss, grad_sum, _grad_shape = _reconstruction_loss_and_grad(
+                    model=model,
+                    x=x,
+                    recon_logits=recon_logits,
+                    posterior_z_component_mean=encoded.posterior_z_component_mean,
+                    posterior_z_component_logvar=encoded.posterior_z_component_logvar,
+                    posterior_k_probs=encoded.posterior_k_probs,
+                )
+            else:
+                out = model(x)
+                loss, grad_sum, _grad_shape = _reconstruction_loss_and_grad(
+                    model=model,
+                    x=x,
+                    recon_logits=out["recon_logits"],
+                    posterior_z_component_mean=out["posterior_z_component_mean"],
+                    posterior_z_component_logvar=out["posterior_z_component_logvar"],
+                    posterior_k_probs=out["posterior_k_probs"],
+                )
+            stats[name]["loss"].append(loss)
+            stats[name]["grad_sum"].append(grad_sum)
+
+    summaries = []
+    for name, values in stats.items():
+        loss_tensor = torch.tensor(values["loss"])
+        grad_tensor = torch.tensor(values["grad_sum"])
+        summaries.append(
+            (
+                float(loss_tensor.mean()),
+                name,
+                float(loss_tensor.std(unbiased=False)),
+                float(grad_tensor.mean()),
+                float(grad_tensor.std(unbiased=False)),
+            )
+        )
+
+    summaries.sort()
+    best_loss = min(summaries, key=lambda row: row[0])
+    best_loss_std = min(summaries, key=lambda row: row[2])
+    
     _print_smoke_header()
+    print("loss_metric=entire_type_aware_grouped_recon_loss_of_disentangled_beta_VAE")
+    print(f"activation_selection_summary trials_per_candidate={trials_per_candidate}")
+    loss_mean, name, loss_std, grad_mean, grad_std = best_loss
+    print("############################################################")
+    print(
+        f"winner_loss_candidate={name} "
+        f"loss_mean={loss_mean:.6f} "
+        f"loss_std={loss_std:.6f} "
+        f"k_logits_head_grad_sum_mean={grad_mean:.6f} "
+        f"k_logits_head_grad_sum_std={grad_std:.6f}"
+    )
+    print("############################################################")
+    loss_mean, name, loss_std, grad_mean, grad_std = best_loss_std
+    print(
+        f"winner_loss_std_candidate={name} "
+        f"loss_mean={loss_mean:.6f} "
+        f"loss_std={loss_std:.6f} "
+        f"k_logits_head_grad_sum_mean={grad_mean:.6f} "
+        f"k_logits_head_grad_sum_std={grad_std:.6f}"
+    )
+    print("############################################################")
+    for loss_mean, name, loss_std, grad_mean, grad_std in summaries:
+        print(
+            f"{name} "
+            f"loss_mean={loss_mean:.6f} "
+            f"loss_std={loss_std:.6f} "
+            f"k_logits_head_grad_sum_mean={grad_mean:.6f} "
+            f"k_logits_head_grad_sum_std={grad_std:.6f}"
+        )
+
+
+def test_k_logits_backprop_with_vanilla_softmax() -> None:
     x = _build_toy_batch()
     # the input `tau_start=0.5` is only a placeholder
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
     recon_logits, encoded = _forward_with_vanilla_softmax(model, x)
 
-    loss, grad_sum, grad_shape = _reconstruction_loss_and_grad(
+    _reconstruction_loss_and_grad(
         model=model,
         x=x,
         recon_logits=recon_logits,
         posterior_z_component_mean=encoded.posterior_z_component_mean,
         posterior_z_component_logvar=encoded.posterior_z_component_logvar,
         posterior_k_probs=encoded.posterior_k_probs,
-    )
-    print(
-        "vanilla_softmax "
-        f"loss={loss:.4f} "
-        f"k_logits_head_grad_sum={grad_sum:.6f} "
-        f"k_logits_head_grad_shape={grad_shape}"
     )
 
 
@@ -206,19 +318,13 @@ def test_k_logits_backprop_with_gumbel_softmax_tau_grid() -> None:
         torch.manual_seed(NN_SMOKE_TEST_SEED)
         out = model(x)
 
-        loss, grad_sum, grad_shape = _reconstruction_loss_and_grad(
+        _reconstruction_loss_and_grad(
             model=model,
             x=x,
             recon_logits=out["recon_logits"],
             posterior_z_component_mean=out["posterior_z_component_mean"],
             posterior_z_component_logvar=out["posterior_z_component_logvar"],
             posterior_k_probs=out["posterior_k_probs"],
-        )
-        print(
-            f"gumbel_softmax_tau={tau:g} "
-            f"loss={loss:.4f} "
-            f"k_logits_head_grad_sum={grad_sum:.6f} "
-            f"k_logits_head_grad_shape={grad_shape}"
         )
 
 
@@ -259,12 +365,15 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
         + math.log(4.0)
     ) / 12
     abs_diff = torch.abs(loss.recon_loss - expected.to(dtype=loss.recon_loss.dtype))
+    
+    _print_smoke_header()
     print(
         "feature_grouped_recon_loss "
         f"actual={float(loss.recon_loss):.6f} "
         f"expected={float(expected):.6f} "
         f"abs_diff={float(abs_diff):.6f}"
     )
+    
     assert torch.isclose(
         loss.recon_loss,
         expected.to(dtype=loss.recon_loss.dtype),
