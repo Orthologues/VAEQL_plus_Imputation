@@ -265,6 +265,20 @@ class BetaGausMixedDVAE(nn.Module):
         """Decode latent samples `z` into reconstruction logits in feature space."""
         return self.decoder(posterior_z)
 
+    @staticmethod
+    def _activate_ordinal_logits(ordinal_logits: torch.Tensor) -> torch.Tensor:
+        """
+        Convert unary ordinal logits into monotone cumulative probabilities.
+
+        Ordinal preprocessing encodes thresholds as `feat-ge_1`, `feat-ge_2`, ...
+        so valid reconstructions must satisfy:
+            P(Y >= 1) >= P(Y >= 2) >= ...
+        Independent sigmoid activations can violate that ordering; a cumulative
+        minimum is the smallest projection needed for valid imputation outputs.
+        """
+        ordinal_probs = torch.sigmoid(ordinal_logits)
+        return torch.cummin(ordinal_probs, dim=1).values
+
     # To implement "a type-aware reconstruction decoder" OR alternatively,
     # "distribution-informed preprocessing with grouped reconstruction losses"
     def activate_reconstruction(
@@ -275,9 +289,11 @@ class BetaGausMixedDVAE(nn.Module):
         """
         Map decoder logits to the valid preprocessed reconstruction space.
 
-        Numeric transformed columns remain real-valued. Binary/ordinal columns are
-        sigmoid-activated, and categorical one-hot groups are stochastically sampled
-        with Gumbel-Softmax using the current scheduled temperature.
+        Numeric transformed columns remain real-valued. Binary columns are
+        sigmoid-activated, ordinal unary groups are sigmoid-activated with
+        monotone cumulative repair, and categorical one-hot groups are
+        stochastically sampled with Gumbel-Softmax using the current scheduled
+        temperature.
         """
         if feat_type_dict is None:
             return recon_logits
@@ -296,10 +312,19 @@ class BetaGausMixedDVAE(nn.Module):
         name_to_index = {name: idx for idx, name in enumerate(ordered_feat_names)}
 
         for feat, n_orders in feat_type_dict.get("ord_feats", {}).items():
-            for order in range(1, int(n_orders)):
-                col_name = f"{feat}-ge_{order}"
-                if col_name in name_to_index:
-                    recon[:, name_to_index[col_name]] = torch.sigmoid(recon_logits[:, name_to_index[col_name]])
+            # Ordinal preprocessing expands one source feature into threshold
+            # columns such as `feat-ge_1`, `feat-ge_2`, ... . Activate each
+            # group together so the cumulative probabilities stay monotone.
+            ordinal_col_names = [
+                f"{feat}-ge_{order}" for order in range(1, int(n_orders))
+            ]
+            grp_idx = [
+                name_to_index[col_name]
+                for col_name in ordinal_col_names
+                if col_name in name_to_index
+            ]
+            if grp_idx:
+                recon[:, grp_idx] = self._activate_ordinal_logits(recon_logits[:, grp_idx])
         for feat in feat_type_dict.get("bi_feats", {}).keys():
             if feat in name_to_index:
                 recon[:, name_to_index[feat]] = torch.sigmoid(recon_logits[:, name_to_index[feat]])

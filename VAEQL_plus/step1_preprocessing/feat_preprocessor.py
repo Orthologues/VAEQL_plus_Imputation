@@ -19,7 +19,7 @@
 # - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochastity compared to Vanilla-Softmax)
 #########################################################
 
-## TODO: change monotonous ordinal transformation to threshold-based surrogates
+
 import os
 import re
 from collections import namedtuple

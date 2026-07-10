@@ -379,3 +379,47 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
         expected.to(dtype=loss.recon_loss.dtype),
         atol=1e-6,
     )
+
+def test_ordinal_activation_enforces_monotone_cumulative_probs() -> None:
+    r"""Ordinal activation should enforce cumulative ordering:
+        $P(Y \ge r) \ge P(Y \ge r+1)$.
+    """
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    x = _build_toy_batch()
+    assert x.shape[1] == len(FEAT_TYPE_DICT["all_feats"])
+    recon_raw = torch.zeros_like(x)
+    name_to_index = {
+        feat_name: idx for idx, feat_name in enumerate(FEAT_TYPE_DICT["all_feats"])
+    }
+
+    expected_by_feat = {}
+    for feat, n_orders in FEAT_TYPE_DICT["ord_feats"].items():
+        grp_idx = [
+            name_to_index[f"{feat}-ge_{order}"]
+            for order in range(1, int(n_orders))
+        ]
+        invalid_probs_smoke = torch.linspace(0.85, 0.15, len(grp_idx), dtype=torch.float32)
+        if len(grp_idx) >= 3:
+            # deliberately yielding the oridinal probabilities non-logical
+            invalid_probs_smoke[1] = 0.20
+            invalid_probs_smoke[2] = 0.80
+        recon_raw[:, grp_idx] = torch.logit(
+            # "-1" means keeping the existing dimension size unchanged
+            invalid_probs_smoke.unsqueeze(0).expand(x.shape[0], -1)
+        )
+        expected_by_feat[feat] = (
+            grp_idx,
+            # apply the cumulative mimimum function on the selected dimension
+            torch.cummin(invalid_probs_smoke.unsqueeze(0), dim=1).values.expand(
+                x.shape[0], -1
+            ),
+        )
+    
+    recon = model.activate_reconstruction(recon_raw, FEAT_TYPE_DICT)
+
+    for grp_idx, expected in expected_by_feat.values():
+        activated = recon[:, grp_idx]
+        assert torch.all(activated[:, :-1] >= activated[:, 1:])
+        # `rtol` is the allowed relative error scaled by the expected value magnitude. Default: 1e-5
+        # `atol` is the allowed absolute error floor for values close to zero. Default: 1e-8
+        assert torch.allclose(activated, expected)
