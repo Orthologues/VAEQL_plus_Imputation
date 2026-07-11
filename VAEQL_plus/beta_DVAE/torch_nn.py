@@ -266,18 +266,38 @@ class BetaGausMixedDVAE(nn.Module):
         return self.decoder(posterior_z)
 
     @staticmethod
-    def _activate_ordinal_logits(ordinal_logits: torch.Tensor) -> torch.Tensor:
+    def _ordered_ordinal_logits(ordinal_raw: torch.Tensor) -> torch.Tensor:
         """
-        Convert unary ordinal logits into monotone cumulative probabilities.
+        Convert one ordinal raw decoder group into ordered cumulative logits.
 
-        Ordinal preprocessing encodes thresholds as `feat-ge_1`, `feat-ge_2`, ...
-        so valid reconstructions must satisfy:
-            P(Y >= 1) >= P(Y >= 2) >= ...
-        Independent sigmoid activations can violate that ordering; a cumulative
-        minimum is the smallest projection needed for valid imputation outputs.
+        Monotone-logit flow:
+            z -> decoder -> ordinal_raw
+            ordinal_raw[:, :1] -> eta(z)
+            ordinal_raw[:, 1:] -> raw logit gaps
+            softplus(raw logit gaps) -> positive gaps
+            eta(z) - cumsum(positive gaps) -> ordered logits for later `feat-ge_*`
+
+        Thus logit_1 >= logit_2 >= ... and sigmoid preserves:
+            P(Y >= 1 | z) >= P(Y >= 2 | z) >= ...
         """
-        ordinal_probs = torch.sigmoid(ordinal_logits)
-        return torch.cummin(ordinal_probs, dim=1).values
+        # Expected shape is (B, R-1): one row per batch item and one column per
+        # unary ordinal threshold (`feat-ge_1`, `feat-ge_2`, ...).
+        if ordinal_raw.ndim != 2:
+            raise ValueError(
+                f"`ordinal_raw` must have shape (B, R-1), got {tuple(ordinal_raw.shape)}"
+            )
+        if ordinal_raw.shape[1] < 1:
+            raise ValueError(
+                f"`ordinal_raw` must include at least one ordinal threshold column, got {tuple(ordinal_raw.shape)}"
+            )
+        # eta(z) is the decoder-derived base logit for the first unary ordinal
+        # threshold; later threshold logits are obtained by subtracting positive gaps.
+        eta = ordinal_raw[:, 0].unsqueeze(1)
+        if ordinal_raw.shape[1] == 1:
+            return eta
+        positive_gaps = F.softplus(ordinal_raw[:, 1:])
+        ordered_tail_logits = eta - torch.cumsum(positive_gaps, dim=1)
+        return torch.cat((eta, ordered_tail_logits), dim=1)
 
     # To implement "a type-aware reconstruction decoder" OR alternatively,
     # "distribution-informed preprocessing with grouped reconstruction losses"
@@ -290,9 +310,9 @@ class BetaGausMixedDVAE(nn.Module):
         Map decoder logits to the valid preprocessed reconstruction space.
 
         Numeric transformed columns remain real-valued. Binary columns are
-        sigmoid-activated, ordinal unary groups are sigmoid-activated with
-        monotone cumulative repair, and categorical one-hot groups are
-        stochastically sampled with Gumbel-Softmax using the current scheduled
+        sigmoid-activated, ordinal unary groups use monotone cumulative logits
+        parameterized by positive softplus gaps, and categorical one-hot groups
+        are stochastically sampled with Gumbel-Softmax using the current scheduled
         temperature.
         """
         if feat_type_dict is None:
@@ -324,7 +344,8 @@ class BetaGausMixedDVAE(nn.Module):
                 if col_name in name_to_index
             ]
             if grp_idx:
-                recon[:, grp_idx] = self._activate_ordinal_logits(recon_logits[:, grp_idx])
+                ordinal_logits = self._ordered_ordinal_logits(recon_logits[:, grp_idx])
+                recon[:, grp_idx] = torch.sigmoid(ordinal_logits)
         for feat in feat_type_dict.get("bi_feats", {}).keys():
             if feat in name_to_index:
                 recon[:, name_to_index[feat]] = torch.sigmoid(recon_logits[:, name_to_index[feat]])
@@ -572,9 +593,16 @@ class BetaGausMixedDVAE(nn.Module):
         loss_terms: List[torch.Tensor] = []
         encoded_feature_indices: set[int] = set()
 
-        def append_binary_cross_entropy_group_loss(indices: Tuple[int, ...]) -> None:
+        def append_binary_cross_entropy_group_loss(
+            indices: Tuple[int, ...],
+            logits_override: torch.Tensor | None = None,
+        ) -> None:
             idx = torch.tensor(indices, dtype=torch.long, device=device)
-            logits_grp = recon_logits.index_select(1, idx)
+            logits_grp = (
+                logits_override
+                if logits_override is not None
+                else recon_logits.index_select(1, idx)
+            )
             target_grp = x_obs_processed_t.index_select(1, idx).clamp(0.0, 1.0)
             obs_grp = loss_obs_mask.index_select(1, idx).bool()
             bce_raw = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -595,7 +623,8 @@ class BetaGausMixedDVAE(nn.Module):
                 loss_terms.append(ce_grp[row_type0_mask].mean())
 
         # Treat each original ordinal feature as one loss unit, no matter how many
-        # unary threshold columns it expands into.
+        # unary threshold columns it expands into. The raw decoder group is first
+        # converted into ordered logits through positive softplus gaps.
         for feat in sorted(ord_feats.keys()):
             n_orders = int(ord_feats[feat])
             grp_idx = tuple(
@@ -603,7 +632,8 @@ class BetaGausMixedDVAE(nn.Module):
                 for order in range(1, n_orders)
             )
             encoded_feature_indices.update(grp_idx)
-            append_binary_cross_entropy_group_loss(grp_idx)
+            ordinal_logits = self._ordered_ordinal_logits(recon_logits[:, grp_idx])
+            append_binary_cross_entropy_group_loss(grp_idx, ordinal_logits)
 
         # Binary features are already one original feature per encoded column.
         for feat in sorted(bi_feats.keys()):

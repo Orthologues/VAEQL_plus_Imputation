@@ -12,9 +12,9 @@
 #   this is not an explicit log-normal decoder likelihood.
 # - Count features: Poisson distribution (Plus-one log-transform, then Z-score scaling)
 #   this is not an explicit Poisson decoder likelihood.
-# - Ordinal features: Ordinal logit-model (unary-encoding, pre-activated transform as logits, then applied with Sigmoid activation)
-#   reconstructed with threshold-wise binary losses; 
-#   this is an ordinal-aware surrogate rather than a full ordered-logit likelihood unless monotonicity is enforced.
+# - Ordinal features: Ordinal logit-model (unary encoding, then monotone cumulative logits in beta-DVAE reconstruction)
+#   reconstructed with grouped threshold-wise binary losses after the softplus-gap ordered-logit transform;
+#   this enforces monotone cumulative probabilities for feat-ge_* columns.
 # - Binary features: Bernoulli distribution (numeric-coded binaries stay in [0, 1], string-coded binaries keep canonical labels; no logit transform in preprocessing, then applied with Sigmoid activation)
 # - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochastity compared to Vanilla-Softmax)
 #########################################################

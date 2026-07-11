@@ -349,7 +349,8 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
 
     # Feature-level loss units:
     # 6 numeric columns, 2 ordinal groups, 2 binary columns, 2 categorical groups.
-    # Zero logits give BCE=log(2), cat_a CE=log(3), cat_b CE=log(4), and
+    # Zero binary logits give BCE=log(2), cat_a CE=log(3), cat_b CE=log(4),
+    # ordinal raw outputs are converted through positive softplus gaps, and
     # numeric features use the same z-score-discounted RMSE rule as the model.
     numeric_expected_terms = []
     for col_idx in range(6):
@@ -358,11 +359,28 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
         numeric_expected_terms.append(
             torch.sqrt((target_col.pow(2) * z_score_disc_coef).mean() + 1e-12)
         )
+    ordinal_expected_terms = []
+    name_to_index = {
+        feat_name: idx for idx, feat_name in enumerate(FEAT_TYPE_DICT["all_feats"])
+    }
+    for feat, n_orders in sorted(FEAT_TYPE_DICT["ord_feats"].items()):
+        grp_idx = [
+            name_to_index[f"{feat}-ge_{order}"]
+            for order in range(1, int(n_orders))
+        ]
+        ordered_logits = model._ordered_ordinal_logits(recon_logits[:, grp_idx])
+        ordinal_target = x[:, grp_idx].clamp(0.0, 1.0)
+        ordinal_bce_raw = torch.nn.functional.binary_cross_entropy_with_logits(
+            ordered_logits,
+            ordinal_target,
+            reduction="none",
+        )
+        ordinal_expected_terms.append(ordinal_bce_raw.mean())
     expected = (
-        torch.stack(numeric_expected_terms).sum()
-        + 4 * math.log(2.0)
-        + math.log(3.0)
-        + math.log(4.0)
+        torch.stack(numeric_expected_terms + ordinal_expected_terms).sum()
+        + 2 * math.log(2.0)  # two binary features
+        + math.log(3.0)  # the first categorical feature with three categories
+        + math.log(4.0)  # the second categorical feature with four categories
     ) / 12
     abs_diff = torch.abs(loss.recon_loss - expected.to(dtype=loss.recon_loss.dtype))
     
@@ -392,34 +410,43 @@ def test_ordinal_activation_enforces_monotone_cumulative_probs() -> None:
         feat_name: idx for idx, feat_name in enumerate(FEAT_TYPE_DICT["all_feats"])
     }
 
-    expected_by_feat = {}
+    expected_probs_by_feat = {}
     for feat, n_orders in FEAT_TYPE_DICT["ord_feats"].items():
         grp_idx = [
             name_to_index[f"{feat}-ge_{order}"]
             for order in range(1, int(n_orders))
         ]
-        invalid_probs_smoke = torch.linspace(0.85, 0.15, len(grp_idx), dtype=torch.float32)
-        if len(grp_idx) >= 3:
-            # deliberately yielding the oridinal probabilities non-logical
-            invalid_probs_smoke[1] = 0.20
-            invalid_probs_smoke[2] = 0.80
-        recon_raw[:, grp_idx] = torch.logit(
-            # "-1" means keeping the existing dimension size unchanged
-            invalid_probs_smoke.unsqueeze(0).expand(x.shape[0], -1)
+        eta_smoke = torch.linspace(-0.5, 0.5, x.shape[0], dtype=torch.float32)
+        recon_raw[:, grp_idx[0]] = eta_smoke
+        assert len(grp_idx) > 1
+        # These remaining raw decoder columns parameterize positive logit gaps
+        # via softplus, so each later `feat-ge_*` logit is lower than the
+        # previous cumulative-threshold logit.
+        raw_gap_logits_smoke = torch.randn(
+            x.shape[0],
+            len(grp_idx) - 1,
+            generator=torch.Generator().manual_seed(NN_SMOKE_TEST_SEED),
         )
-        expected_by_feat[feat] = (
-            grp_idx,
-            # apply the cumulative mimimum function on the selected dimension
-            torch.cummin(invalid_probs_smoke.unsqueeze(0), dim=1).values.expand(
-                x.shape[0], -1
+        recon_raw[:, grp_idx[1:]] = raw_gap_logits_smoke
+        positive_gaps = torch.nn.functional.softplus(raw_gap_logits_smoke)
+        assert torch.all(positive_gaps > 0)
+        expected_logits = torch.cat(
+            (
+                eta_smoke.unsqueeze(1),
+                eta_smoke.unsqueeze(1) - torch.cumsum(positive_gaps, dim=1),
             ),
+            dim=1,
+        )
+        expected_probs_by_feat[feat] = (
+            grp_idx,
+            torch.sigmoid(expected_logits),
         )
     
     recon = model.activate_reconstruction(recon_raw, FEAT_TYPE_DICT)
 
-    for grp_idx, expected in expected_by_feat.values():
-        activated = recon[:, grp_idx]
-        assert torch.all(activated[:, :-1] >= activated[:, 1:])
+    for grp_idx, expected_probs in expected_probs_by_feat.values():
+        activated_probs = recon[:, grp_idx]
+        assert torch.all(activated_probs[:, :-1] >= activated_probs[:, 1:])
         # `rtol` is the allowed relative error scaled by the expected value magnitude. Default: 1e-5
         # `atol` is the allowed absolute error floor for values close to zero. Default: 1e-8
-        assert torch.allclose(activated, expected)
+        assert torch.allclose(activated_probs, expected_probs)
