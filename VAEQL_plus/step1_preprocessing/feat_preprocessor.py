@@ -6,17 +6,20 @@
 # Description1: Feature preprocessor utilities for the VAE-Q learning imputation baseline based on the provided features in "VAEQL_plus.conf.FeaturesTypeDict".
 # Description2: This module includes the class(es) with functions for preprocessing features according to their types (real-valued, positive real-valued, count, ordinal, binary, categorical) as defined in the FeaturesTypeDict.
 # Description3: 
-# Prior distribution assumptions of the features for imputation after z-score scaling/one-hot encoding/unary encoding are:
-# - Real-valued features: Gaussian distribution (Z-score scaling mean and std estimated from observed data)
-# - Positive real-valued features: Log-normal distribution (Yeo-Johnson log-transform, then Z-score scaling)
+# Feature transformation assumptions before beta-DVAE reconstruction are:
+# - Real-valued features: Gaussian-style transformed-space reconstruction (Z-score scaling mean and std estimated from observed data)
+# - Positive real-valued features: Yeo-Johnson transform, then Z-score scaling
 #   this is not an explicit log-normal decoder likelihood.
-# - Count features: Poisson distribution (Plus-one log-transform, then Z-score scaling)
+# - Count features: nonnegative count-valued variables transformed with log1p and clipping
 #   this is not an explicit Poisson decoder likelihood.
+#   Clinical count variables can be overdispersed, zero-inflated, outlier-prone,
+#   bounded by study design, or administratively coded, so we do not assume a
+#   Poisson distribution for count values here.
 # - Ordinal features: Ordinal logit-model (unary encoding, then monotone cumulative logits in beta-DVAE reconstruction)
 #   reconstructed with grouped threshold-wise binary losses after the softplus-gap ordered-logit transform;
 #   this enforces monotone cumulative probabilities for feat-ge_* columns.
 # - Binary features: Bernoulli distribution (numeric-coded binaries stay in [0, 1], string-coded binaries keep canonical labels; no logit transform in preprocessing, then applied with Sigmoid activation)
-# - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochastity compared to Vanilla-Softmax)
+# - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochasticity compared to Vanilla-Softmax)
 #########################################################
 
 
@@ -258,8 +261,8 @@ class FeaturePreprocessor:
                 out_df[col] = series
         return out_df, list(cols)
 
-    # Distribution: Poisson (count features)
-    # Transform stage here: plus-one log transform with clipping to [-5, 5].
+    # Count features: transformed-space count handling, not a Poisson likelihood.
+    # Transform stage here: log1p transform with clipping to [-5, 5].
     def _transform_count(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
             pre_df = self.input_df.select(
@@ -271,9 +274,8 @@ class FeaturePreprocessor:
         transformed = transformed.clip(lower=-5.0, upper=5.0)
         return transformed, list(cols)
 
-    # Distribution: Ordinal logit-model (ordinal features)
-    # Transform stage here: unary encoding (K-1 thresholds)
-    # Correspoding activation function of the logit outputs: Sigmoid
+    # Ordinal features: unary encoding (K-1 thresholds).
+    # In beta-DVAE reconstruction, ordinal groups are mapped through monotone cumulative logits.
     def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         if spark:
             pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
@@ -364,7 +366,7 @@ class FeaturePreprocessor:
 
     # Distribution: Categorical distribution (categorical features)
     # Transform stage here: one-hot encoding
-    # Correspoding activation function of the logit outputs: Gumbel-Softmax (adds more stochasticity compared to Vanilla-Softmax, which can be beneficial for imputation tasks)
+    # Corresponding activation function of the logit outputs: Gumbel-Softmax (adds more stochasticity compared to Vanilla-Softmax, which can be beneficial for imputation tasks)
     def _transform_categorical(self, cat_feats: Dict[str, Set[str]], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         cols = sorted(cat_feats.keys())
         categories = [sorted(cat_feats[col]) for col in cols]
