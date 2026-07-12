@@ -16,7 +16,7 @@ c. Additionally, ensure the monotonicity of the unary-encoded logits and activat
 
 d. Add SMOKE-TESTING for the aforementioned <b>a, b, c</b> fixes <b>(SOLVED)</b>.
 
-### Issue 2 (1/5 SOLVED):
+### Issue 2 (1/4 SOLVED):
 Summary title: Hybrid type-aware reconstruction objective and Q-learning interface.
 
 Another crucial yet defensible caveat of the `Dis-$\beta$-VAEQL` algorithm: <br>
@@ -31,6 +31,21 @@ b. Document and preserve the processed-space interface between beta-DVAE reconst
 
 c. Add a separate PDS/Ministral adapter metadata layer before compiling clinical source variables into the compact model-facing `FeatureTypeDict` <b>(TODO)</b>. This metadata should preserve `source_feature`, `canonical_feature`, `model_type`, `num_levels`, raw-to-canonical mappings, missing-value codes, evidence source, and confidence. For example, raw `ECOGPS` (ECOG scores for cancer treatments) can be represented as canonical ordinal `ecog` with six levels and then compiled into `{"ord_feats": {"ecog": 6}}`.
 
-d. However, add reverse-transformation during `Dis-$\beta$-VAEQL`-reconstruction and raw-scale evaluations to the code under `VAEQL_plus/beta_DVAE` if it is currently absent (less urgent, not necessary for evaluation of the algorithm) <b>(TODO)</b>.
+d. Add a smaller HIVAE-style likelihood-native ablation if time permits <b>(TODO)</b>. Here, likelihood-native means that each decoder head outputs feature-family distribution parameters and trains with negative log-likelihood on the corresponding scale. For example, an explicit Poisson count head would output a positive rate `lambda(z)` and optimize `-log Poisson(x; lambda(z))`, while an explicit log-normal positive-continuous head would output `mu(z)` and positive `sigma(z)` and optimize `-log LogNormal(x; mu(z), sigma(z))`. This differs from the current transformed-space approach, where count and positive-continuous features are reconstructed as processed common-space values rather than explicit Poisson/log-normal decoder likelihoods.
 
-e. Add a smaller HIVAE-style likelihood-native ablation if time permits <b>(TODO)</b>. Here, likelihood-native means that each decoder head outputs feature-family distribution parameters and trains with negative log-likelihood on the corresponding scale. For example, an explicit Poisson count head would output a positive rate `lambda(z)` and optimize `-log Poisson(x; lambda(z))`, while an explicit log-normal positive-continuous head would output `mu(z)` and positive `sigma(z)` and optimize `-log LogNormal(x; mu(z), sigma(z))`. This differs from the current transformed-space approach, where count and positive-continuous features are reconstructed as processed common-space values rather than explicit Poisson/log-normal decoder likelihoods.
+### Issue 3 (0/1 SOLVED):
+Summary title: Primary transformed-space metrics with secondary raw-scale interpretability checks.
+
+Research-mode recommendation: do not completely omit reverse transformation, but use it in a limited and clearly scoped way. The primary benchmark should remain in processed/transformed space because this is the modeling and Q-learning action space. Raw-scale reverse-transformed metrics should be reported only as secondary interpretability checks for selected clinically meaningful variables.
+
+#### My comments:
+a. Add evaluation support for a two-tier metric report <b>(TODO)</b>.
+
+| Feature type | Primary metric | Secondary / optional metric |
+| --- | --- | --- |
+| real / positive-real / count-as-transformed | standardized RMSE or MAE | raw-scale MAE/RMSE for selected clinically interpretable variables |
+| binary | AUROC, AUPRC, F1, balanced accuracy | calibration / Brier score |
+| categorical | macro-F1, macro-AUROC one-vs-rest, cross-entropy | per-class recall for rare classes |
+| ordinal | ordinal MAE, macro-F1, weighted kappa | threshold-wise AUROC if using cumulative encoding |
+
+This keeps the primary benchmark aligned with the transformed modeling/Q-learning space while using reverse transformation only for limited interpretability checks.
