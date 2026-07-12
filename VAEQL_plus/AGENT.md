@@ -3,6 +3,8 @@
 ## Following the commit `8b37a73`
 
 ### Issue 1 (4/4 SOLVED):
+Summary title: Component-wise GMM posterior sampling and differentiable categorical reconstruction.
+
 A crucial and indefensible caveat of the `Dis-$\beta$-VAEQL` algorithm: <br>
 `The current encoder computes component-specific means and variances, but then appears to aggregate them into **a single posterior moment** before sampling. That is convenient computationally, but it is not the same thing as correctly sampling from a Gaussian mixture posterior, because mixture variance includes both within-component and between-component terms. This does not make the method unusable, but it is exactly the kind of issue a careful reviewer will notice. I would treat it as one of the first items to tighten before submission.`
 #### My comments:
@@ -14,7 +16,9 @@ c. Additionally, ensure the monotonicity of the unary-encoded logits and activat
 
 d. Add SMOKE-TESTING for the aforementioned <b>a, b, c</b> fixes <b>(SOLVED)</b>.
 
-### Issue 2 (1/2 SOLVED):
+### Issue 2 (1/3 SOLVED):
+Summary title: Hybrid type-aware reconstruction objective and Q-learning interface.
+
 Another crucial yet defensible caveat of the `Dis-$\beta$-VAEQL` algorithm: <br>
 `The repository uses a hybrid type-aware reconstruction objective, but is not fully
 likelihood-native in the same sense as HI-VAE. The numeric, positive-real, and count
@@ -23,4 +27,6 @@ and ordinal features use likelihood-equivalent grouped losses/heads. That makes 
 #### My comments:
 a. We should keep the current norm of my code since it is not supposed to be `HIVAE` plus Q-learning, and my current hybrid type-aware reconstruction objective for heterogeneous feature types is defensible. Modify the comments to clarify my method <b>(SOLVED)</b>.
 
-b. However, add reverse-transformation during `Dis-$\beta$-VAEQL`-reconstruction to the code under `VAEQL_plus/beta_DVAE` if it is currently absent (less urgent, not necessary for evaluation of the algorithm) <b>(TODO)</b>.
+b. Document and preserve the processed-space interface between beta-DVAE reconstruction and Q-learning actions <b>(TODO)</b>. The transformed common space is not merely a shortcut: it lets the Q-agent use comparable normalized numeric actions such as `a in {-delta, 0, +delta}` across feature types. After adjustment, continuous features remain continuous, counts can be inverse-transformed and rounded, binary features can be thresholded or sampled, nominal features can be selected by grouped argmax or sampling, and ordinal outputs can be decoded through ordered cumulative probabilities. Raw Poisson/log-normal heads would force the RL action space to modify rates, means, variances, or sampled values differently for every feature family, which would complicate the MDP.
+
+c. However, add reverse-transformation during `Dis-$\beta$-VAEQL`-reconstruction to the code under `VAEQL_plus/beta_DVAE` if it is currently absent (less urgent, not necessary for evaluation of the algorithm) <b>(TODO)</b>.
