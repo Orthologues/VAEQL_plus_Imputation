@@ -16,7 +16,7 @@ c. Additionally, ensure the monotonicity of the unary-encoded logits and activat
 
 d. Add SMOKE-TESTING for the aforementioned <b>a, b, c</b> fixes <b>(SOLVED)</b>.
 
-### Issue 2 (1/3 SOLVED):
+### Issue 2 (1/4 SOLVED):
 Summary title: Hybrid type-aware reconstruction objective and Q-learning interface.
 
 Another crucial yet defensible caveat of the `Dis-$\beta$-VAEQL` algorithm: <br>
@@ -29,4 +29,6 @@ a. We should keep the current norm of my code since it is not supposed to be `HI
 
 b. Document and preserve the processed-space interface between beta-DVAE reconstruction and Q-learning actions <b>(TODO)</b>. The transformed common space is not merely a shortcut: it lets the Q-agent use comparable normalized numeric actions such as `a in {-delta, 0, +delta}` across feature types. After adjustment, continuous features remain continuous, counts can be inverse-transformed and rounded, binary features can be thresholded or sampled, nominal features can be selected by grouped argmax or sampling, and ordinal outputs can be decoded through ordered cumulative probabilities. Raw Poisson/log-normal heads would force the RL action space to modify rates, means, variances, or sampled values differently for every feature family, which would complicate the MDP.
 
-c. However, add reverse-transformation during `Dis-$\beta$-VAEQL`-reconstruction to the code under `VAEQL_plus/beta_DVAE` if it is currently absent (less urgent, not necessary for evaluation of the algorithm) <b>(TODO)</b>.
+c. However, add reverse-transformation during `Dis-$\beta$-VAEQL`-reconstruction and raw-scale evaluations to the code under `VAEQL_plus/beta_DVAE` if it is currently absent (less urgent, not necessary for evaluation of the algorithm) <b>(TODO)</b>.
+
+d. Add a smaller HIVAE-style likelihood-native ablation if time permits <b>(TODO)</b>. Here, likelihood-native means that each decoder head outputs feature-family distribution parameters and trains with negative log-likelihood on the corresponding scale. For example, an explicit Poisson count head would output a positive rate `lambda(z)` and optimize `-log Poisson(x; lambda(z))`, while an explicit log-normal positive-continuous head would output `mu(z)` and positive `sigma(z)` and optimize `-log LogNormal(x; mu(z), sigma(z))`. This differs from the current transformed-space approach, where count and positive-continuous features are reconstructed as processed common-space values rather than explicit Poisson/log-normal decoder likelihoods.
