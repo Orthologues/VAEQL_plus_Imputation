@@ -1,42 +1,62 @@
-# Disentangled_BetaVAE_Imputation
-Sub-project during my PhD journey at SDU
+# VAEQL-plus Imputation
 
-## Documentations of the necessary and potentially useful libraries 
+Research code for mixed-type tabular data imputation with a disentangled beta-VAE
+and Q-learning-oriented reconstruction pipeline.
 
-### sklearn.impute
-Documentation: <a>https://scikit-learn.org/stable/modules/impute.html</a>
-### pyamputer
-Documentation: <a>https://rianneschouten.github.io/pyampute/build/html/pyampute.html</a>
+This repository is an active research prototype. I intend to develop it toward a
+future medical-related CS/ML conference publication.
 
-## Documentations of the necessary github repositories or papers
+## Overview
 
-### <i>GAIN</i> algorithm
-Original implementation: <a>https://github.com/jsyoon0823/GAIN</a> <br/>
-PyTorch implementation: <a>https://github.com/dhanajitb/GAIN-Pytorch</a>
+`VAEQL_plus` explores imputation for heterogeneous tabular data with:
 
-### <i>CGAIN</i> algorithm
-<a>https://github.com/saqibejaz/CGAIN</a>
+- type-aware preprocessing for continuous, positive-continuous, count, binary,
+  categorical, and ordinal features;
+- a Gaussian-mixture disentangled beta-VAE core;
+- grouped reconstruction losses for expanded categorical and ordinal features;
+- monotone cumulative ordinal reconstruction logits;
+- research notes and baseline papers for comparison against VAE, GAN, and
+  reinforcement-learning imputation methods.
 
-### <i>RL-based MDP Imputation</i> algorithm
-There is no source code for this one unfortunately. <br/>
-Link to the paper with pseudo code: <a>https://link.springer.com/article/10.1007/s00521-022-06958-3</a>
+## Repository Layout
 
-## Installation of env libraries
-### pip
+```text
+VAEQL_plus/                 main package
+VAEQL_plus/beta_DVAE/       beta-VAE model, training wrapper, tuning notes
+VAEQL_plus/step1_preprocessing/
+                             feature preprocessing utilities
+VAEQL_plus/step2_beta_C_tuning/
+                             beta/C tuning entry points
+VAEQL_plus/tests/           smoke tests and import tests
+baseline_papers/            reference papers
+AWS_dev_notes.md            infrastructure and data-governance notes
+```
+
+## Setup
+
+Create the Conda environment:
+
 ```bash
-pip install -r requirements.txt
+conda env create -f ml_env_gpu.yml
+conda activate ml_env_gpu
 ```
 
-### conda 
+Run the smoke tests:
+
 ```bash
-conda clean --all -y && conda env create -f ml_env.yml 
+pytest
+pytest VAEQL_plus/tests/nn_smoke_tests.py -q
+pytest VAEQL_plus/tests/import_batch_mods_test.py -q
 ```
 
-### Install Nextflow for reproducible analysis
-Firstly, ensure that Java (Java 11 or newer) is properly installed in your OS, then run:
-```
-sudo apt install -y ca-certificates &&
-curl -s https://get.nextflow.io | bash &&
-sudo mv nextflow /usr/local/bin/ &&
-nextflow -version
-```
+## Notes
+
+- The code is research software, not a clinical decision-support tool.
+- Some datasets and generated artifacts are archived for development history;
+  review data-use constraints before making any derived data public.
+- The current method should be described as a hybrid type-aware reconstruction
+  objective, not as a fully likelihood-native HI-VAE implementation.
+
+## License
+
+See `LICENSE`.
