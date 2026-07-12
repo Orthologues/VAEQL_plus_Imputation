@@ -108,7 +108,50 @@ Output schema (JSON):
 Deliverable:
 - Bedrock labeling pipeline producing versioned `feature_types.json` plus audit trail.
 
-### 4.4 Recommended Low-Cost SLM/Agent Stack (for `FeatureTypeDict`)
+### 4.4 PDS/Ministral Adapter Metadata Layer
+Goal:
+- Keep dataset-specific clinical coding evidence separate from the compact model-facing `FeatureTypeDict`.
+
+Recommended adapter metadata object:
+```json
+{
+  "source_feature": "ECOGPS",
+  "canonical_feature": "ecog",
+  "model_type": "ordinal",
+  "num_levels": 6,
+  "raw_to_canonical": {
+    "0": 0,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5
+  },
+  "missing_values": ["", "NA", "9", "99"],
+  "evidence": "Dataset dictionary",
+  "confidence": 0.99
+}
+```
+
+Compilation target for the existing model dictionary:
+```json
+{
+  "ord_feats": {
+    "ecog": 6
+  }
+}
+```
+
+Why this is useful:
+- The adapter preserves raw PDS/Ministral source names, canonical feature names, missing-value codes, evidence, and confidence separately from beta-DVAE model metadata.
+- The model-facing dictionary remains minimal and stable (`ord_feats`, `cat_feats`, `bi_feats`, etc.).
+- Dataset-specific recoding decisions become auditable and reproducible before preprocessing.
+- Human reviewers can inspect the adapter metadata without touching the model code.
+
+Deliverable:
+- Versioned adapter metadata files under `SLM_reasoned_feat_profiles/`, compiled into the final `FeatureTypeDict` used by `VAEQL_plus`.
+
+### 4.5 Recommended Low-Cost SLM/Agent Stack (for `FeatureTypeDict`)
 Primary recommendation (cost + operational simplicity):
 1. Orchestrator agent: lightweight Python agent (rule-first, then model call).
 2. Inference model: Bedrock `meta.llama3-1-8b-instruct-v1:0`.
@@ -203,16 +246,19 @@ Deliverables:
 ## Suggested Implementation Backlog (New)
 1. Add `feature_type_agent.py`:
 - deterministic profiler + Bedrock fallback + strict JSON schema output to `FeatureTypeDict`.
-2. Add `latent_segmentation.py`:
+2. Add `pds_ministral_adapter_metadata.py`:
+- validate source-to-canonical feature metadata, raw-to-canonical mappings, missing-value codes, evidence, and confidence before compiling to `FeatureTypeDict`.
+3. Add `latent_segmentation.py`:
 - extract latent vectors, run MiniBatchKMeans/GMM, persist cluster artifacts.
-3. Add `cluster_summary_agent.py`:
+4. Add `cluster_summary_agent.py`:
 - summarize clusters from numerical stats only (no raw PHI text).
-4. Add config toggles:
+5. Add config toggles:
 - `enable_feature_type_agent`,
+- `enable_adapter_metadata_validation`,
 - `enable_latent_segmentation`,
 - `segmentation_method = minibatch_kmeans|gmm|hdbscan`,
 - `enable_cluster_summary_agent`.
-5. Add evaluation report:
+6. Add evaluation report:
 - typing agreement, segmentation stability, demographic balance metrics, compute cost per run.
 
 ## Minimal Backlog (Immediate Tasks)
