@@ -35,7 +35,7 @@ c. Add a separate PDS/Ministral adapter metadata layer before compiling clinical
 
 d. Add a smaller HIVAE-style likelihood-native ablation if time permits <b>(TODO)</b>. Here, likelihood-native means that each decoder head outputs feature-family distribution parameters and trains with negative log-likelihood on the corresponding scale. For example, an explicit Poisson count head would output a positive rate `lambda(z)` and optimize `-log Poisson(x; lambda(z))`, while an explicit log-normal positive-continuous head would output `mu(z)` and positive `sigma(z)` and optimize `-log LogNormal(x; mu(z), sigma(z))`. This differs from the current transformed-space approach, where count and positive-continuous features are reconstructed as processed common-space values rather than explicit Poisson/log-normal decoder likelihoods.
 
-### Issue 3 (0/2 SOLVED):
+### Issue 3 (0/3 SOLVED):
 Summary title: Primary transformed-space metrics with secondary raw-scale interpretability checks.
 
 Research-mode recommendation: do not completely omit reverse transformation, but use it in a limited and clearly scoped way. The primary benchmark should remain in processed/transformed space because this is the modeling and Q-learning action space. Raw-scale reverse-transformed metrics should be reported only as secondary interpretability checks for selected clinically meaningful variables.
@@ -43,13 +43,17 @@ Research-mode recommendation: do not completely omit reverse transformation, but
 #### TODOs:
 a. Add evaluation support for a two-tier metric report <b>(TODO)</b>.
 
-| Feature type | Primary metric | Secondary / optional metric |
-| --- | --- | --- |
-| real / positive-real / count-as-transformed | standardized RMSE or MAE | raw-scale MAE/RMSE for selected clinically interpretable variables |
-| binary | AUROC, AUPRC, F1, balanced accuracy | calibration / Brier score |
-| categorical | macro-F1, macro-AUROC one-vs-rest, cross-entropy | per-class recall for rare classes |
-| ordinal | ordinal MAE, macro-F1, weighted kappa | threshold-wise AUROC if using cumulative encoding |
+| Family | Metric |
+| --- | --- |
+| continuous | transformed MAE/RMSE |
+| positive continuous | transformed MAE/RMSE |
+| count | log1p-space MAE/RMSE |
+| binary | AUROC, F1 |
+| categorical | macro-F1 |
+| ordinal | ordinal MAE / weighted kappa |
 
 This keeps the primary benchmark aligned with the transformed modeling/Q-learning space while using reverse transformation only for limited interpretability checks.
 
 b. Add a small manuscript-facing secondary raw-scale table for clinically important variables only <b>(TODO)</b>. Candidate variables include `age, BMI, baseline lab values, ECOG, tumor burden, selected blood counts, and selected treatment-history counts`. This table should help readers interpret whether a transformed-space error such as standardized `RMSE = 0.42` is clinically meaningful, without requiring raw-scale metrics for every feature.
+
+c. Add inverse transformation only for the selected clinically important variables used by TODO `b` <b>(TODO)</b>. This should support demonstration and manuscript interpretability, not become the default metric path for every feature. The implementation should recover raw-scale values for the chosen variables before computing the secondary raw-scale table.
