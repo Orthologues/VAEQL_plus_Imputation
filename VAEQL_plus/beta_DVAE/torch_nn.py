@@ -299,8 +299,8 @@ class BetaGausMixedDVAE(nn.Module):
         ordered_tail_logits = eta - torch.cumsum(positive_gaps, dim=1)
         return torch.cat((eta, ordered_tail_logits), dim=1)
 
-    # To implement "a type-aware reconstruction decoder" OR alternatively,
-    # "distribution-informed preprocessing with grouped reconstruction losses"
+    # To implement the hybrid type-aware reconstruction objective:
+    # transformed-space numeric surrogates plus grouped discrete heads/losses.
     def activate_reconstruction(
         self,
         recon_logits: torch.Tensor,
@@ -521,7 +521,7 @@ class BetaGausMixedDVAE(nn.Module):
         eps: float = 1e-12,
     ) -> "BetaGausMixedDVAE.BetaCapacityLossOutput":
         """
-        Compute the beta-capacity loss for mixed-type tabular reconstruction.
+        Compute the beta-capacity loss with a hybrid type-aware reconstruction objective.
 
         Inputs:
         - `recon_logits`: `(B, D)` decoder outputs in preprocessed feature space.
@@ -536,8 +536,8 @@ class BetaGausMixedDVAE(nn.Module):
 
         Behavior:
         - reconstruction loss weighting uses only type-0 cells (`obs_mask == 0`),
-        - uses BCE-with-logits on binary/ordinal non-categorical columns,
-        - uses z-score-discounted RMSE/MAE on numeric non-categorical columns,
+        - uses transformed-space RMSE/MAE on numeric/count-style columns,
+        - uses BCE-with-logits on binary columns and monotone ordinal cumulative logits,
         - uses categorical CE on each categorical one-hot group with per-row observed-weighting,
         - combines reconstruction with KL-capacity term:
           `total = recon_loss + beta * |mean(KL) - C|`.
@@ -680,7 +680,7 @@ class BetaGausMixedDVAE(nn.Module):
 
         if not loss_terms:
             raise ValueError("No observed feature groups were available for reconstruction loss.")
-        # Type-aware feature-level reduction: ordinal/categorical expansions are
+        # hybrid type-aware reconstruction objective: ordinal/categorical expansions are
         # averaged inside their original feature group before this final average.
         recon_loss = torch.stack(loss_terms).mean()
 

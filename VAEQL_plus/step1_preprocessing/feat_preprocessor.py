@@ -6,7 +6,7 @@
 # Description1: Feature preprocessor utilities for the VAE-Q learning imputation baseline based on the provided features in "VAEQL_plus.conf.FeaturesTypeDict".
 # Description2: This module includes the class(es) with functions for preprocessing features according to their types (real-valued, positive real-valued, count, ordinal, binary, categorical) as defined in the FeaturesTypeDict.
 # Description3: 
-# Feature transformation assumptions before beta-DVAE reconstruction are:
+# Feature transformation assumptions before the hybrid type-aware reconstruction objective are:
 # - Real-valued features: Gaussian-style transformed-space reconstruction (Z-score scaling mean and std estimated from observed data)
 # - Positive real-valued features: Yeo-Johnson transform, then Z-score scaling
 #   this is not an explicit log-normal decoder likelihood.

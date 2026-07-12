@@ -5,6 +5,8 @@ import torch
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -196,6 +198,39 @@ def _forward_with_vanilla_softmax(
     k_weights = torch.softmax(encoded.posterior_k_logits, dim=1)
     z = torch.sum(k_weights.unsqueeze(-1) * component_z, dim=1)
     return model.decode(z), encoded
+
+
+def test_component_wise_posterior_sampling_keeps_gmm_axis() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    encoded = model.encode(x)
+
+    expected_component_shape = (x.shape[0], model.k_gmm, model.z_dim)
+    assert encoded.posterior_z_component_mean.shape == expected_component_shape
+    assert encoded.posterior_z_component_logvar.shape == expected_component_shape
+    assert encoded.posterior_k_logits.shape == (x.shape[0], model.k_gmm)
+    assert encoded.posterior_k_probs.shape == (x.shape[0], model.k_gmm)
+
+    torch.manual_seed(NN_SMOKE_TEST_SEED)
+    z = model.reparameterize_mixture(
+        encoded.posterior_z_component_mean,
+        encoded.posterior_z_component_logvar,
+        encoded.posterior_k_logits,
+    )
+    assert z.shape == (x.shape[0], model.z_dim)
+
+    # Calling ``.mean(dim=1)` averages over the GMM component axis K, collapsing it into: `(B, Z)`
+    aggregated_mean = encoded.posterior_z_component_mean.mean(dim=1)
+    aggregated_logvar = encoded.posterior_z_component_logvar.mean(dim=1)
+    
+    # this call is expected to fail since `aggregated_mean` and `aggregated_logvar` 
+    # both do not possess the correct shape `(B, K, Z)`
+    with pytest.raises(ValueError, match="must have shape"):
+        model.reparameterize_mixture(
+            aggregated_mean,
+            aggregated_logvar,
+            encoded.posterior_k_logits,
+        )
 
 
 def test_randomized_k_logits_activation_selection_summary() -> None:
@@ -397,6 +432,7 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
         expected.to(dtype=loss.recon_loss.dtype),
         atol=1e-6,
     )
+
 
 def test_ordinal_activation_enforces_monotone_cumulative_probs() -> None:
     r"""Ordinal activation should enforce cumulative ordering:
