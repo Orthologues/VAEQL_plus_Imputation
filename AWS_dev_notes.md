@@ -22,30 +22,73 @@ A minimal S3 structure is sufficient:
 
 ```text
 s3://<bucket>/<dataset_id>/
-  raw/
-  metadata/
-  processed/
-  runs/<run_id>/
+  raw/                         original input files, read-only after upload
+  metadata/                    dataset manifests and feature metadata
+  processed/                   preprocessed tables used by VAEQL_plus
+  runs/<run_id>/config/        exact config and feature dictionary for the run
+  runs/<run_id>/tuning/        beta/C search outputs such as beta_analysis.csv
+  runs/<run_id>/models/        checkpoints and selected model artifacts
+  runs/<run_id>/logs/          training and evaluation logs through convergence or the maximum episode count
+  runs/<run_id>/evaluation/    transformed-space metrics and small raw-scale tables
 ```
 
-## Mandatory Bedrock Mistral SLM Agent
+## Mandatory Bedrock Mistral SLM Metadata Tasks
 
-A Mistral SLM agent hosted through Amazon Bedrock is mandatory for:
+Use Amazon Bedrock as the mandatory runtime for Mistral SLM metadata calls. The
+SLM is a bounded metadata assistant, not a modeling component. It standardizes
+clinical metadata before preprocessing and reporting.
 
-- metadata standardization;
-- feature-type identification;
-- cohort demographics summaries from aggregate statistics.
+Runtime rule:
 
-The agent should use dataset dictionaries, column descriptions, value counts,
-missingness summaries, and other non-identifying aggregate information. Its
-output must be validated before it is used to build `FeatureTypeDict`.
+- Bedrock with Mistral: required for metadata standardization, feature-type
+  identification, and cohort demographic summaries.
+- SageMaker: reserved for beta-DVAE training and beta/C tuning, or for a future
+  self-hosted SLM if Bedrock models are insufficient.
 
-Keep dataset-specific evidence in a small metadata record containing the source
-feature, canonical feature, model type, coding rules, missing-value codes,
-evidence, and confidence. Human review remains required for uncertain mappings.
+Mandatory SLM-assisted tasks:
 
-Use SageMaker for beta-DVAE training and beta/C tuning. It is not the default
-runtime for the mandatory Mistral metadata agent.
+1. Standardize source metadata into the adapter schema:
+   - source feature name;
+   - canonical feature name;
+   - raw-to-canonical coding;
+   - missing-value codes;
+   - evidence and confidence.
+2. Identify feature types for `FeatureTypeDict`:
+   - continuous;
+   - positive continuous;
+   - count;
+   - binary;
+   - categorical;
+   - ordinal.
+3. Summarize cohort demographics from aggregate statistics only:
+   - cohort size;
+   - age/BMI summaries where available;
+   - sex/gender distribution where allowed;
+   - ECOG or other baseline-status distributions;
+   - missingness overview.
+
+Example SLM metadata output:
+
+```json
+{
+  "source_feature": "ECOGPS",
+  "canonical_feature": "ecog",
+  "suggested_model_type": "ordinal",
+  "num_levels": 6,
+  "missing_values": ["", "NA", "9", "99"],
+  "confidence": 0.99,
+  "evidence": "Dataset dictionary says ECOG performance status ranges 0-5",
+  "needs_human_review": false
+}
+```
+
+Keep dataset-specific evidence in metadata containing the source feature,
+canonical feature, model type, coding rules, missing-value codes, evidence, and
+confidence. Human review remains required for uncertain mappings.
+
+Validate SLM output before compiling it into `FeatureTypeDict`. Do not send raw
+PHI/PII rows to the SLM; use data dictionaries, column summaries, value counts,
+missingness summaries, and aggregate cohort statistics.
 
 ## Run Outputs
 
