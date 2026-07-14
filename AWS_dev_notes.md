@@ -16,7 +16,34 @@ research decisions in this repository.
 - Restrict S3 access and KMS decryption to the roles used for preprocessing,
   training, and evaluation.
 - Keep raw data read-only after ingestion.
-- Do not send PHI/PII to model prompts, logs, or public artifacts.
+- Do not send PHI/PII to unapproved model endpoints, application logs, or
+  public artifacts.
+
+### PHI/PII Handling for Bedrock
+
+PHI (Protected Health Information) includes diagnoses, laboratory results,
+medications, and other health data linked to a person. PII (Personally
+Identifiable Information) includes names, patient IDs, dates of birth,
+addresses, and contact details; `PHII` is a common typo for `PII`.
+
+Patient-level PHI/PII may be sent to the approved Bedrock Mistral path when it
+is necessary for a metadata task and the data-governance requirements for the
+deployment have been approved. In that case:
+
+- send the minimum fields and rows needed for the task;
+- prefer pseudonymous IDs and remove direct identifiers whenever they are not
+  needed;
+- use only the approved AWS account, region, IAM role, network path, and model
+  configuration;
+- keep prompts and responses out of application logs, notebooks, public
+  artifacts, and error messages;
+- encrypt stored inputs, outputs, and audit records with the project KMS key;
+- retain only the approved records for the documented retention period; and
+- require human review for uncertain mappings or clinically sensitive output.
+
+Use data dictionaries, column summaries, value counts, missingness summaries,
+and aggregate cohort statistics instead of patient-level rows whenever they are
+sufficient for the task.
 
 A minimal S3 structure is sufficient:
 
@@ -86,9 +113,9 @@ Keep dataset-specific evidence in metadata containing the source feature,
 canonical feature, model type, coding rules, missing-value codes, evidence, and
 confidence. Human review remains required for uncertain mappings.
 
-Validate SLM output before compiling it into `FeatureTypeDict`. Do not send raw
-PHI/PII rows to the SLM; use data dictionaries, column summaries, value counts,
-missingness summaries, and aggregate cohort statistics.
+Validate SLM output before compiling it into `FeatureTypeDict`. Use metadata
+and aggregate summaries by default; if raw PHI/PII rows are necessary, apply
+the controls in the PHI/PII handling section and document why they were needed.
 
 ## Run Outputs
 
