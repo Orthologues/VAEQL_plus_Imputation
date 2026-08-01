@@ -1,6 +1,6 @@
 # VAEQL-plus Imputation
 
-Research code for mixed-type tabular data imputation with a disentangled beta-VAE
+Research code for mixed-type tabular data imputation with a disentangled $\beta$-VAE
 and Q-learning-oriented reconstruction pipeline.
 
 This repository is an active research prototype. I intend to develop it toward a
@@ -12,7 +12,7 @@ future medical-related CS/ML conference publication.
 
 - type-aware preprocessing for continuous, positive-continuous, count, binary,
   categorical, and ordinal features;
-- a Gaussian-mixture disentangled beta-VAE core;
+- a Gaussian-mixture disentangled $\beta$-VAE core;
 - grouped reconstruction losses for expanded categorical and ordinal features;
 - monotone cumulative ordinal reconstruction logits;
 - a preliminary two-phase AWS Batch workflow: Ministral 8B annotation on GPU,
@@ -25,11 +25,11 @@ future medical-related CS/ML conference publication.
 
 ```text
 VAEQL_plus/                 main package
-VAEQL_plus/beta_DVAE/       beta-VAE model, training wrapper, tuning notes
+VAEQL_plus/beta_DVAE/       $\beta$-VAE model, training wrapper, tuning notes
 VAEQL_plus/step1_preprocessing/
                              feature preprocessing utilities
 VAEQL_plus/step2_beta_C_tuning/
-                             beta/C tuning entry points
+                             $\beta$/C tuning entry points
 VAEQL_plus/util/             AWS Batch/S3 interfaces and shared utilities
 VAEQL_plus/tests/           smoke tests and other miscellaneous tests
 baseline_papers/            reference papers

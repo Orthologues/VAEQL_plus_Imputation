@@ -1,6 +1,6 @@
 # AWS Dev Notes for `VAEQL_plus`
 
-Use AWS Batch for `a.` private SLM-empowered PDS metadata preparation, `b.` beta/C tuning prior to training, `c.` beta-DVAE training, and `d.` reproducible evaluation jobs. Use private S3 for
+Use AWS Batch for `a.` private SLM-empowered PDS metadata preparation, `b.` $\beta$/C tuning prior to training, `c.` $\beta$-DVAE training, and `d.` reproducible evaluation jobs. Use private S3 for
 structured datasets and run storage. Keep the modeling code and research
 decisions in this repository.
 
@@ -26,7 +26,7 @@ manifest to encrypted S3. The annotation job is not the DRL model and must not
 silently alter the source data.
 
 Phase 2 starts only from the versioned Phase 1 S3 output. It pulls the
-structured dataset, applies the documented preprocessing contract, conducts halving grid search to select the `beta` and `C` hyperparameters and thus trains the DRL model (including its `beta-DVAE` and Q-learning steps) on a GPU instance, and saves the final model, run configuration (including the applied hyperparameters), and evaluation statistics to S3.
+structured dataset, applies the documented preprocessing contract, conducts halving grid search to select the $\beta$ and $C$ hyperparameters and thus trains the DRL model (including its $\beta$-DVAE and Q-learning steps) on a GPU instance, and saves the final model, run configuration (including the applied hyperparameters), and evaluation statistics to S3.
 
 The Phase 1 to Phase 2 contract must include the dataset metadata, compiled `FeatureTypeDict`, preprocessing parameters, random seeds,
 model configuration, and source-to-canonical feature mappings. A failed or
@@ -81,7 +81,7 @@ s3://<bucket>/<dataset_id>/
   metadata/                    dataset manifests and feature metadata
   processed/                   preprocessed tables used by VAEQL_plus
   runs/<run_id>/config/        exact config and feature dictionary for the run
-  runs/<run_id>/tuning/        beta/C search outputs such as beta_analysis.csv
+  runs/<run_id>/tuning/        hyperparameter search outputs such as beta_analysis.csv
   runs/<run_id>/models/        checkpoints and selected model artifacts
   runs/<run_id>/logs/          training and evaluation logs through convergence or the maximum episode count
   runs/<run_id>/evaluation/    transformed-space metrics and small raw-scale tables
@@ -90,8 +90,8 @@ s3://<bucket>/<dataset_id>/
 ## AWS Batch Runtime and SLM Metadata Tasks
 
 Use AWS Batch as the mandatory runtime for metadata standardization,
-feature-type identification, cohort demographic summaries, beta-DVAE training,
-beta/C tuning, and evaluation. Each job runs an approved, versioned container.
+feature-type identification, cohort demographic summaries, $\beta$-DVAE training,
+$\beta$/C tuning, and evaluation. Each job runs an approved, versioned container.
 The SLM is a bounded metadata assistant, not a modeling component; it
 standardizes clinical metadata before preprocessing and reporting.
 
@@ -113,8 +113,8 @@ intended step modules are:
 
 - `step1_preprocessing`: metadata adapter validation and type-aware
   preprocessing;
-- `step2_beta_C_tuning`: beta/C cross-validation and model selection; and
-- `step3_drl_training`: DRL-agent, beta-DVAE, and Q-learning training from the
+- `step2_beta_C_tuning`: $\beta$/C cross-validation and model selection; and
+- `step3_drl_training`: DRL-agent, $\beta$-DVAE, and Q-learning training from the
   versioned Phase 1 S3 dataset; and
 - future `stepX_X` modules: evaluation and reporting stages using the same
   Batch and S3 interfaces.
@@ -175,7 +175,7 @@ Each run should retain:
 
 - the dataset and metadata versions;
 - the Phase 1 structured-dataset version and annotation manifest;
-- preprocessing and beta/C tuning configuration;
+- preprocessing and $\beta$/C tuning configuration;
 - the compiled `FeatureTypeDict`;
 - `beta_analysis.csv` and selected model checkpoints;
 - the Phase 2 DRL-agent configuration and final model artifact;

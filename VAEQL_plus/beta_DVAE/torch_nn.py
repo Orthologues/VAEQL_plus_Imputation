@@ -392,7 +392,7 @@ class BetaGausMixedDVAE(nn.Module):
         }
 
 
-    # Recipes of the Loss Function (K-component-wise KL divergence Plus the Disentangled-Beta-tuned Reconstruction Loss)
+    # Recipes of the Loss Function (K-component-wise KL divergence Plus the Disentangled-$\beta$-tuned Reconstruction Loss)
     def gmm_kl_decomposed(
         self,
         posterior_z_component_mean: torch.Tensor,

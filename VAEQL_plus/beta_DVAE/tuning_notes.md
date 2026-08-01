@@ -11,10 +11,10 @@
 - Metrics are logged to `beta_analysis.csv` for every fold/epoch chunk; the best $(\beta, C)$ is retrained once on fold 0 and checkpointed under `model_outdir`.
 
 ## Project Structure & Module Organization
-- `torch_nn.py` hosts the PyTorch beta-VAE neural-network module.
-- `lightning_mod.py` hosts the Lightning training wrapper and beta/C tuning helpers.
+- `torch_nn.py` hosts the PyTorch $\beta$-VAE neural-network module.
+- `lightning_mod.py` hosts the Lightning training wrapper and $\beta$/C tuning helpers.
 - `utils.py` hosts shared masking helpers and coverage metrics.
-- The shared beta/C tuning defaults and default CV-config path are exposed through `VAEQL_plus.conf.config.DisentangledBetaVaeTuningConfig`; keep edits consistent with that contract.
+- The shared $\beta$/C tuning defaults and default CV-config path are exposed through `VAEQL_plus.conf.config.DisentangledBetaVaeTuningConfig`; keep edits consistent with that contract.
 - Long-running jobs emit `beta_analysis.csv`, `lock.txt`, and `trained_models/`; keep large artifacts out of git.
 
 ## Build, Test, and Development Commands

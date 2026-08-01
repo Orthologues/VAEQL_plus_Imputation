@@ -39,7 +39,7 @@ def _resolve_device():
         return "cpu"
 
 
-# pre-training of the disentangled beta-VAE (corner-halving search)
+# pre-training of the disentangled $\beta$-VAE (corner-halving search)
 class DisentangledBetaVaeTuningConfig(TypedDict):
     """Configuration aligned with the beta-DVAE corner-halving CV driver."""
 
@@ -220,7 +220,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         return cfg
 
 
-# tranining of the dientangled beta-VAEQL imputation pipeline
+# tranining of the dientangled $\beta$-VAEQL imputation pipeline
 class VaeQlConfig(TypedDict):
     """Configuration for VAE-Q learning imputation baseline."""
     # Dataset configs
@@ -232,7 +232,7 @@ class VaeQlConfig(TypedDict):
     n_gmm_components: int # number of mixed Gaussian prior components in the discrete latent space S
     vae_cont_lat_dim: int # dimension of the continuous latent space Z (each composed of the weighted disc_lat_dim Gaussian components)
     vae_alpha: float # learning rate for the VAE training
-    vae_beta: float # beta parameter for the KL term of the VAE loss (reconstruction error + KL divergence)
+    vae_beta: float # $\beta$ parameter for the KL term of the VAE loss (reconstruction error + KL divergence)
     vae_C: float # capacity parameter for the KL term of the VAE loss (reconstruction error + KL divergence)
     vae_batch_size: int
     vae_layers: int # number of layers for the VAE encoder and decoder (symmetric architecture)
@@ -348,7 +348,7 @@ class VaeQlConfig(TypedDict):
         except Exception as e:
             raise ValueError(f"dataset_features must contain 'all_feats' key, which refers to a set of all feature names; error: {e!r}")
 
-        # Disentangled beta-VAE hyperparameters
+        # Disentangled $\beta$-VAE hyperparameters
         if vae_beta <= 0:
             raise ValueError(f"vae_beta must be > 0; got {vae_beta!r}.")
         if vae_C < 0:

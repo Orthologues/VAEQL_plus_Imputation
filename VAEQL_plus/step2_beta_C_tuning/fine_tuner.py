@@ -180,7 +180,7 @@ def train_and_save_best_model(
         final_epochs=final_epochs,
         metric=metric,
         validation_input=validation_input,
-        validation_mask=validation_mask, # expected to contain values {0, 1, 2, 3, 4} with 3 as beta-C validation entries
+        validation_mask=validation_mask, # expected to contain values {0, 1, 2, 3, 4} with 3 as $\beta$-C validation entries
         imputation_mask=pre_val_amputation_mask, # expected to contain values {0, 1, 2} with 2 as imputation entries for final evaluation
         recycles=config["recycles"],
         num_imputations=config["m"],

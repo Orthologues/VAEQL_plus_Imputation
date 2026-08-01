@@ -55,9 +55,9 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     
     ####################################################################################################
     # 1. Inherited Named Tuples for annotation of the return types of methods & Constants for this Class
-    # `validation_input`: numeric validation fold input after beta-C validation amputation; pre-imputed after amputation, leaving no NaN values for beta-DVAE
-    # `validation_mask`: 0/1/2/3/4 mask for beta-C validation semantics
-    # `imputation_mask`: original 0/1/2 mask for beta-DVAE imputation semantics; unchanged by beta-C validation amputation
+    # `validation_input`: numeric validation fold input after $\beta$-C validation amputation; pre-imputed after amputation, leaving no NaN values for $\beta$-DVAE
+    # `validation_mask`: 0/1/2/3/4 mask for $\beta$-C validation semantics
+    # `imputation_mask`: original 0/1/2 mask for $\beta$-DVAE imputation semantics; unchanged by $\beta$-C validation amputation
     ####################################################################################################
     
     # Candidate metric semantics:
@@ -215,7 +215,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         
 
     ####################################################################################################
-    # 3. Static Helpers for training, validating and evaluating beta-DVAE
+    # 3. Static Helpers for training, validating and evaluating $\beta$-DVAE
     ####################################################################################################
     @staticmethod
     def _log_training_losses(module: "BetaGausMixedDVAETrainer", loss_output) -> None:
@@ -423,9 +423,9 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             X_mask=validation_mask_t,
         )
         multi_impute_mean_t = torch.mean(multi_imputes_t, dim=0)
-        # remember that type-3 cells are the only ones included in the beta-C validation metrics; 
+        # remember that type-3 cells are the only ones included in the $\beta$-C validation metrics;
         # type-4 cells are excluded from metrics since they don't have ground-truth reference values, 
-        # and type-0/1/2 cells are not part of the beta-C validation semantics at all
+        # and type-0/1/2 cells are not part of the $\beta$-C validation semantics at all
         mask_type3_t = BetaGausMixedDVAEUtils.mask_validation_type3_indices(
             validation_mask_t,
             tuple(validation_ref_t.shape),
@@ -995,7 +995,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     
     @staticmethod
     def _run_candidates_parallel(
-        candidates: List[Tuple[float, float]], # a pair of `(beta, C)` hyperparams
+        candidates: List[Tuple[float, float]], # a pair of `($\beta$, C)` hyperparams
         config: Dict,
         preimputed_data_for_ref: np.ndarray,
         amputated_data_for_val: np.ndarray,

@@ -345,7 +345,7 @@ class BetaGausMixedDVAEUtils:
         null_cols = np.array(null_cols_list, dtype=np.int8)
         pre_validation_vals = validation_mask[null_rows, null_cols]
         # Type-4 cells are explicitly excluded from validation metrics because
-        # they were already non-observed before beta-C validation.
+        # they were already non-observed before $\beta$-C validation.
         validation_mask[null_rows, null_cols] = np.where(pre_validation_vals == 0, 3, 4)
         return BetaGausMixedDVAEUtils.ValidationAmputationOutput(
             validation_input=torch.as_tensor(validation_input, dtype=torch.float32),

@@ -15,7 +15,7 @@
 #   Clinical count variables can be overdispersed, zero-inflated, outlier-prone,
 #   bounded by study design, or administratively coded, so we do not assume a
 #   Poisson distribution for count values here.
-# - Ordinal features: Ordinal logit-model (unary encoding, then monotone cumulative logits in beta-DVAE reconstruction)
+# - Ordinal features: Ordinal logit-model (unary encoding, then monotone cumulative logits in $\beta$-DVAE reconstruction)
 #   reconstructed with grouped threshold-wise binary losses after the softplus-gap ordered-logit transform;
 #   this enforces monotone cumulative probabilities for feat-ge_* columns.
 # - Binary features: Bernoulli distribution (numeric-coded binaries stay in [0, 1], string-coded binaries keep canonical labels; no logit transform in preprocessing, then applied with Sigmoid activation)
@@ -275,7 +275,7 @@ class FeaturePreprocessor:
         return transformed, list(cols)
 
     # Ordinal features: unary encoding (K-1 thresholds).
-    # In beta-DVAE reconstruction, ordinal groups are mapped through monotone cumulative logits.
+    # In $\beta$-DVAE reconstruction, ordinal groups are mapped through monotone cumulative logits.
     def _transform_ordinal(self, ord_feats: Dict[str, int], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         if spark:
             pre_df = self.input_df.select(*sorted(ord_feats.keys())).toPandas()
