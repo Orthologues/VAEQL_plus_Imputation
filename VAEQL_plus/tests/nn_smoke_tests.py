@@ -1,3 +1,13 @@
+#########################################################
+# Author： Jiawei Zhao
+# Email1: jiz@sdu.dk
+# Email2: jwz.student.bmc.lu@gmail.com
+# Date: 2026-08-01
+# Description: Deterministic neural-network smoke tests for the beta-DVAE.
+# Development: Mainly written with GPT-5.5 Medium/GPT-5.6 Luna-XHigh on Codex, with Jiawei Zhao's human
+# review and revisions.
+#########################################################
+
 from __future__ import annotations
 
 import math

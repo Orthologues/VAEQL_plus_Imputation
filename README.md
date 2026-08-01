@@ -46,7 +46,6 @@ Run the smoke tests:
 ```bash
 pytest
 pytest VAEQL_plus/tests/nn_smoke_tests.py -q
-pytest VAEQL_plus/tests/import_batch_mods_test.py -q
 ```
 
 ## Notes

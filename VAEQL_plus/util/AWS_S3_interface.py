@@ -1,9 +1,14 @@
-"""S3 helpers for protected VAEQL run artifacts.
+#########################################################
+# Author： Jiawei Zhao
+# Email1: jiz@sdu.dk
+# Email2: jwz.student.bmc.lu@gmail.com
+# Date: 2026-08-01
+# Description: S3 helpers for protected VAEQL run artifacts.
+# Development: Mainly written with GPT-5.5 Medium/GPT-5.6 Luna-XHigh on Codex, with Jiawei Zhao's human
+# review and revisions.
+#########################################################
 
-PDS data and model artifacts are written with native S3 server-side encryption
-(SSE-S3/AES256). The functions accept injected boto3 clients so unit tests and
-local dry runs never require AWS credentials.
-"""
+"""S3 helpers for protected VAEQL run artifacts."""
 
 from __future__ import annotations
 

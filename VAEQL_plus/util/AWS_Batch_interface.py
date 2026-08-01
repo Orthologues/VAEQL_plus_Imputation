@@ -1,9 +1,14 @@
-"""Small, import-safe AWS Batch helpers for VAEQL training steps.
+#########################################################
+# Author： Jiawei Zhao
+# Email1: jiz@sdu.dk
+# Email2: jwz.student.bmc.lu@gmail.com
+# Date: 2026-08-01
+# Description: Small, import-safe AWS Batch helpers for VAEQL training steps.
+# Development: Mainly written with GPT-5.5 Medium/GPT-5.6 Luna-XHigh on Codex, with Jiawei Zhao's human
+# review and revisions.
+#########################################################
 
-The module deliberately does not create an AWS client at import time. This
-keeps local preprocessing, tests, and documentation builds independent of AWS
-credentials while still providing a thin boto3 boundary for ``stepX_X`` jobs.
-"""
+"""AWS Batch helpers for VAEQL training steps."""
 
 from __future__ import annotations
 
