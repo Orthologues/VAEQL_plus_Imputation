@@ -1,7 +1,36 @@
 # AWS Dev Notes for `VAEQL_plus`
 
-Use AWS Batch for `a.` private SLM-empowered PDS metadata preparation, `b.` beta/C tuning prior to training, `c.` beta-DVAE training, and `d.` reproducible evaluation jobs. Use private S3 for dataset and
-run storage. Keep the modeling code and research decisions in this repository.
+Use AWS Batch for `a.` private SLM-empowered PDS metadata preparation, `b.` beta/C tuning prior to training, `c.` beta-DVAE training, and `d.` reproducible evaluation jobs. Use private S3 for
+structured datasets and run storage. Keep the modeling code and research
+decisions in this repository.
+
+## Preliminary Two-Phase Workflow
+
+The preliminary deployment workflow separates clinical-data annotation from
+DRL training. AWS Batch schedules both jobs onto approved GPU compute, while
+S3 is the versioned handoff between them:
+
+```text
+[ Phase 1: Annotation Job ] --> GPU instance --> Ministral 8B
+                                  --> structured dataset --> encrypted S3
+                                                               |
+                                                               v
+[ Phase 2: DRL Training Job ] --> GPU instance --> pulls structured dataset
+                                  --> trains DRL model --> final model in S3
+```
+
+Phase 1 runs Ministral 8B as a bounded annotation and metadata-standardization
+job. It validates source-feature mappings, compiles the model-facing
+`FeatureTypeDict`, and writes a versioned structured dataset plus its metadata
+manifest to encrypted S3. The annotation job is not the DRL model and must not
+silently alter the source data.
+
+Phase 2 starts only from the versioned Phase 1 S3 output. It pulls the
+structured dataset, applies the documented preprocessing contract, conducts halving grid search to select the `beta` and `C` hyperparameters and thus trains the DRL model (including its `beta-DVAE` and Q-learning steps) on a GPU instance, and saves the final model, run configuration (including the applied hyperparameters), and evaluation statistics to S3.
+
+The Phase 1 to Phase 2 contract must include the dataset metadata, compiled `FeatureTypeDict`, preprocessing parameters, random seeds,
+model configuration, and source-to-canonical feature mappings. A failed or
+uncertain annotation job must block Phase 2 until human review resolves it.
 
 ## Data Storage and Security
 
@@ -85,8 +114,10 @@ intended step modules are:
 - `step1_preprocessing`: metadata adapter validation and type-aware
   preprocessing;
 - `step2_beta_C_tuning`: beta/C cross-validation and model selection; and
-- future `stepX_X` modules: training, Q-learning, and evaluation stages using
-  the same Batch and S3 interfaces.
+- `step3_drl_training`: DRL-agent, beta-DVAE, and Q-learning training from the
+  versioned Phase 1 S3 dataset; and
+- future `stepX_X` modules: evaluation and reporting stages using the same
+  Batch and S3 interfaces.
 
 Pass dataset, run, and S3 identifiers through job environment variables or the
 versioned run configuration. Do not put private data in Batch job definitions,
@@ -143,18 +174,21 @@ and document why they were needed.
 Each run should retain:
 
 - the dataset and metadata versions;
+- the Phase 1 structured-dataset version and annotation manifest;
 - preprocessing and beta/C tuning configuration;
 - the compiled `FeatureTypeDict`;
 - `beta_analysis.csv` and selected model checkpoints;
+- the Phase 2 DRL-agent configuration and final model artifact;
 - random seeds and environment notes;
 - transformed-space evaluation metrics;
 - selected raw-scale metrics for clinically important features.
 
 ## Next Tasks
 
-1. Define the S3 paths, Batch job queue, and job definitions in project
-   configuration.
-2. Package and version the selected SLM container; validate its metadata output
-   before compiling `FeatureTypeDict`.
-3. Save each run's configuration, feature dictionary, tuning output, model, and
-   evaluation results together.
+1. Define the Phase 1 and Phase 2 S3 paths, Batch job queue, GPU compute
+   environment, and job definitions in project configuration.
+2. Package and version the Ministral 8B annotation container; validate its
+   structured output before compiling `FeatureTypeDict`.
+3. Implement the Phase 1-to-Phase 2 dataset manifest and review gate.
+4. Save each run's configuration, feature dictionary, tuning output, DRL model,
+   and evaluation results together.

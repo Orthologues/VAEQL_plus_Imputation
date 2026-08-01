@@ -18,7 +18,7 @@ c. Additionally, ensure the monotonicity of the unary-encoded logits and activat
 d. Add SMOKE-TESTING for the aforementioned <b>a, b, c</b> fixes <b>(SOLVED)</b>.
 
 ### Issue 2 (1/4 SOLVED):
-Summary title: Hybrid type-aware reconstruction objective and Q-learning interface.
+Summary title: Hybrid type-aware reconstruction objective and two-phase DRL interface.
 
 Another crucial yet defensible caveat of the `Dis-$\beta$-VAEQL` algorithm: <br>
 `The repository uses a hybrid type-aware reconstruction objective, but is not fully
@@ -29,11 +29,15 @@ and ordinal features use likelihood-equivalent grouped losses/heads. That makes 
 #### TODOs:
 a. We should keep the current norm of my code since it is not supposed to be `HIVAE` plus Q-learning, and my current hybrid type-aware reconstruction objective for heterogeneous feature types is defensible. Modify the comments to clarify my method <b>(SOLVED)</b>.
 
-b. Document and preserve the processed-space interface between beta-DVAE reconstruction and Q-learning actions <b>(TODO)</b>. The transformed common space is not merely a shortcut: it lets the Q-agent use comparable normalized numeric actions such as `a in {-delta, 0, +delta}` across feature types. After adjustment, continuous features remain continuous, counts can be inverse-transformed and rounded, binary features can be thresholded or sampled, nominal features can be selected by grouped argmax or sampling, and ordinal outputs can be decoded through ordered cumulative probabilities. Raw Poisson/log-normal heads would force the RL action space to modify rates, means, variances, or sampled values differently for every feature family, which would complicate the MDP.
+b. Document and preserve the processed-space interface between the Phase 1 structured dataset, beta-DVAE reconstruction, and Phase 2 Q-learning/DRL actions <b>(TODO)</b>. The transformed common space is not merely a shortcut: it lets the Q-agent use comparable normalized numeric actions such as `a in {-delta, 0, +delta}` across feature types. After adjustment, continuous features remain continuous, counts can be inverse-transformed and rounded, binary features can be thresholded or sampled, nominal features can be selected by grouped argmax or sampling, and ordinal outputs can be decoded through ordered cumulative probabilities. Raw Poisson/log-normal heads would force the RL action space to modify rates, means, variances, or sampled values differently for every feature family, which would complicate the MDP.
 
-c. Add a separate PDS/Ministral adapter metadata layer before compiling clinical source variables into the compact model-facing `FeatureTypeDict` <b>(TODO)</b>. This metadata should preserve `source_feature`, `canonical_feature`, `model_type`, `num_levels`, raw-to-canonical mappings, missing-value codes, evidence source, and confidence. For example, raw `ECOGPS` (ECOG scores for cancer treatments) can be represented as canonical ordinal `ecog` with six levels and then compiled into `{"ord_feats": {"ecog": 6}}`.
+c. Implement Phase 1 as a separate PDS/Ministral 8B annotation job before compiling clinical source variables into the compact model-facing `FeatureTypeDict` <b>(TODO)</b>. The job should write a versioned structured dataset and metadata manifest to encrypted S3 for Phase 2. The metadata must preserve `source_feature`, `canonical_feature`, `model_type`, `num_levels`, raw-to-canonical mappings, missing-value codes, evidence source, and confidence. For example, raw `ECOGPS` (ECOG scores for cancer treatments) can be represented as canonical ordinal `ecog` with six levels and then compiled into `{"ord_feats": {"ecog": 6}}`.
 
 d. Add a smaller HIVAE-style likelihood-native ablation if time permits <b>(TODO)</b>. Here, likelihood-native means that each decoder head outputs feature-family distribution parameters and trains with negative log-likelihood on the corresponding scale. For example, an explicit Poisson count head would output a positive rate `lambda(z)` and optimize `-log Poisson(x; lambda(z))`, while an explicit log-normal positive-continuous head would output `mu(z)` and positive `sigma(z)` and optimize `-log LogNormal(x; mu(z), sigma(z))`. This differs from the current transformed-space approach, where count and positive-continuous features are reconstructed as processed common-space values rather than explicit Poisson/log-normal decoder likelihoods.
+
+e. Implement Phase 2 as a GPU-based DRL training job that conducts halving grid search for `beta` and `C`, pulls only the validated, versioned Phase 1 structured dataset from S3, and writes the final DRL agent, run configuration (including the applied hyperparameters), and evaluation statistics back to S3 <b>(TODO)</b>. The job must fail closed when the Phase 1 dataset, metadata manifest, or human-review status is missing.
+
+f. Add an end-to-end smoke workflow for the Phase 1-to-Phase 2 handoff using a tiny synthetic dataset and local fake S3/Batch clients <b>(TODO)</b>. The test should verify that annotation output is versioned, the compiled `FeatureTypeDict` is preserved, and the DRL training job consumes the same dataset manifest.
 
 ### Issue 3 (0/3 SOLVED):
 Summary title: Primary transformed-space metrics with secondary raw-scale interpretability checks.

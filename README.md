@@ -15,6 +15,9 @@ future medical-related CS/ML conference publication.
 - a Gaussian-mixture disentangled beta-VAE core;
 - grouped reconstruction losses for expanded categorical and ordinal features;
 - monotone cumulative ordinal reconstruction logits;
+- a preliminary two-phase AWS Batch workflow: Ministral 8B annotation on GPU,
+  encrypted S3 structured-dataset handoff, and GPU DRL training with the final
+  model and evaluation statistics saved to S3;
 - research notes and baseline papers for comparison against VAE, GAN, and
   reinforcement-learning imputation methods.
 
@@ -27,7 +30,8 @@ VAEQL_plus/step1_preprocessing/
                              feature preprocessing utilities
 VAEQL_plus/step2_beta_C_tuning/
                              beta/C tuning entry points
-VAEQL_plus/tests/           smoke tests and import tests
+VAEQL_plus/util/             AWS Batch/S3 interfaces and shared utilities
+VAEQL_plus/tests/           smoke tests and other miscellaneous tests
 baseline_papers/            reference papers
 AWS_dev_notes.md            infrastructure and data-governance notes
 ```
