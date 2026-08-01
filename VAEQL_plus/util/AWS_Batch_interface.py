@@ -1,0 +1,158 @@
+"""Small, import-safe AWS Batch helpers for VAEQL training steps.
+
+The module deliberately does not create an AWS client at import time. This
+keeps local preprocessing, tests, and documentation builds independent of AWS
+credentials while still providing a thin boto3 boundary for ``stepX_X`` jobs.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+
+def _batch_client(*, region_name: str | None = None, client: Any | None = None) -> Any:
+    """Return an injected client or lazily create a boto3 Batch client."""
+    if client is not None:
+        return client
+    try:
+        import boto3
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment-specific
+        raise RuntimeError(
+            "boto3 is required for AWS Batch operations; install the project "
+            "environment before submitting a job."
+        ) from exc
+    return boto3.client("batch", region_name=region_name)
+
+
+def build_step_command(
+    step_module: str,
+    *,
+    arguments: Sequence[str] = (),
+) -> list[str]:
+    """Build the default command for a Python ``stepX_X`` module."""
+    if not step_module or step_module.startswith("-"):
+        raise ValueError("step_module must be a non-empty Python module path")
+    return ["python", "-m", step_module, *[str(argument) for argument in arguments]]
+
+
+def build_submit_job_request(
+    *,
+    job_name: str,
+    job_queue: str,
+    job_definition: str,
+    command: Sequence[str] | None = None,
+    environment: Mapping[str, str] | None = None,
+    parameters: Mapping[str, str] | None = None,
+    depends_on: Sequence[str] = (),
+    array_size: int | None = None,
+    retry_attempts: int | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Build a validated ``batch.submit_job`` request without network access."""
+    for name, value in (
+        ("job_name", job_name),
+        ("job_queue", job_queue),
+        ("job_definition", job_definition),
+    ):
+        if not value:
+            raise ValueError(f"{name} must be non-empty")
+
+    request: dict[str, Any] = {
+        "jobName": job_name,
+        "jobQueue": job_queue,
+        "jobDefinition": job_definition,
+    }
+
+    container_overrides: dict[str, Any] = {}
+    if command is not None:
+        if not command:
+            raise ValueError("command must contain at least one argument")
+        container_overrides["command"] = [str(argument) for argument in command]
+    if environment:
+        container_overrides["environment"] = [
+            {"name": str(name), "value": str(value)}
+            for name, value in environment.items()
+        ]
+    if container_overrides:
+        request["containerOverrides"] = container_overrides
+
+    if parameters:
+        request["parameters"] = {str(name): str(value) for name, value in parameters.items()}
+    if depends_on:
+        request["dependsOn"] = [{"jobId": str(job_id)} for job_id in depends_on]
+    if array_size is not None:
+        if array_size < 2 or array_size > 10_000:
+            raise ValueError("array_size must be between 2 and 10000")
+        request["arrayProperties"] = {"size": int(array_size)}
+    if retry_attempts is not None:
+        if retry_attempts < 1 or retry_attempts > 10:
+            raise ValueError("retry_attempts must be between 1 and 10")
+        request["retryStrategy"] = {"attempts": int(retry_attempts)}
+    if timeout_seconds is not None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than zero")
+        request["timeout"] = {"attemptDurationSeconds": int(timeout_seconds)}
+
+    return request
+
+
+def submit_training_step(
+    *,
+    job_name: str,
+    job_queue: str,
+    job_definition: str,
+    step_module: str,
+    arguments: Sequence[str] = (),
+    environment: Mapping[str, str] | None = None,
+    parameters: Mapping[str, str] | None = None,
+    depends_on: Sequence[str] = (),
+    array_size: int | None = None,
+    retry_attempts: int | None = 1,
+    timeout_seconds: int | None = None,
+    region_name: str | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Submit one VAEQL ``stepX_X`` module to AWS Batch."""
+    request = build_submit_job_request(
+        job_name=job_name,
+        job_queue=job_queue,
+        job_definition=job_definition,
+        command=build_step_command(step_module, arguments=arguments),
+        environment=environment,
+        parameters=parameters,
+        depends_on=depends_on,
+        array_size=array_size,
+        retry_attempts=retry_attempts,
+        timeout_seconds=timeout_seconds,
+    )
+    return _batch_client(region_name=region_name, client=client).submit_job(**request)
+
+
+def describe_jobs(
+    job_ids: Sequence[str],
+    *,
+    region_name: str | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Return AWS Batch state for the supplied job IDs."""
+    ids = [str(job_id) for job_id in job_ids if str(job_id)]
+    if not ids:
+        raise ValueError("job_ids must contain at least one job ID")
+    return _batch_client(region_name=region_name, client=client).describe_jobs(jobs=ids)
+
+
+def cancel_job(
+    job_id: str,
+    *,
+    reason: str = "Cancelled by VAEQL job controller",
+    region_name: str | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Cancel a submitted job with an auditable reason."""
+    if not job_id:
+        raise ValueError("job_id must be non-empty")
+    return _batch_client(region_name=region_name, client=client).cancel_job(
+        jobId=job_id,
+        reason=reason,
+    )
