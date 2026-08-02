@@ -39,10 +39,11 @@ uncertain annotation job must block Phase 2 until human review resolves it.
 - PDS datasets stored in S3 shall not be public unless explicitly required by
   the reviewer.
 - Block public access by default.
-- Encrypt all S3 objects with native S3 server-side encryption (`SSE-S3`,
-  `AES256`).
-- Restrict S3 access to the roles used for preprocessing, training, and
-  evaluation.
+- Encrypt all S3 objects with server-side encryption using customer-provided
+  keys (`SSE-C`, `AES256`) and a base64-encoded 256-bit AES key. Require the
+  same key for each S3 read/write request and never commit or log it.
+- Enable SSE-C for the bucket before uploading objects by setting
+  `BlockedEncryptionTypes` to `NONE`.
 - Keep raw data read-only after ingestion.
 - Do not send PHI/PII to unapproved model endpoints, application logs, or
   public artifacts.
