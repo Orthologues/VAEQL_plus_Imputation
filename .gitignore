@@ -13,3 +13,6 @@ __pycache__/
 **/*.code-workspace
 **/*_archived/
 **/VAEQL_algorithm/
+**/drafts_private/
+**/.env
+**/.env.*

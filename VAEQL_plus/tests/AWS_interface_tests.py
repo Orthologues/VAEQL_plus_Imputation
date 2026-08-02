@@ -94,6 +94,12 @@ def test_batch_request_contains_step_command_and_environment() -> None:
     assert request["retryStrategy"] == {"attempts": 2}
 
 
+@pytest.mark.parametrize("step_module", ["", "step1", "VAEQL_plus.step1", "-step1_preprocessing"])
+def test_build_step_command_rejects_invalid_step_modules(step_module: str) -> None:
+    with pytest.raises(ValueError, match="dotted VAEQL step module path"):
+        AWS_Batch_Interface.build_step_command(step_module)
+
+
 def test_submit_training_step_uses_injected_batch_client() -> None:
     client = FakeBatchClient()
     batch = AWS_Batch_Interface(client=client)

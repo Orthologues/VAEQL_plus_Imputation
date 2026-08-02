@@ -58,9 +58,14 @@ class AWS_S3_Interface:
             raise ValueError("sse_customer_key_b64 must be valid base64") from exc
         if len(key_bytes) != _SSE_C_KEY_BYTES:
             raise ValueError("sse_customer_key_b64 must decode to exactly 32 bytes")
+        # Convert the raw MD5 digest to the Base64 format required by S3.
         key_md5 = base64.b64encode(
+            # .digest() returns the raw binary MD5 hash
             hashlib.md5(key_bytes, usedforsecurity=False).digest()
         ).decode("ascii")
+        # key_bytes is the 32-byte AES-256 customer key.
+        # key_md5 is the key's Base64-encoded MD5 digest,
+        # represented as a Python string for S3 request validation.
         return key_bytes, key_md5
 
     def _sse_c_args(self) -> dict[str, Any]:

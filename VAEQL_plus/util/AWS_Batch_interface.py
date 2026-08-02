@@ -13,13 +13,23 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 
 # Constants
+
 # Documentation: https://docs.aws.amazon.com/batch/latest/userguide/specifying-sensitive-data-secrets.html
+# Local setup: store one Base64-encoded 32-byte AES key in an ignored env file:
+# VAEQL_S3_SSE_CUSTOMER_KEY_B64=<base64-encoded-key>
+# Load it before submitting the Batch job; never commit or print the key.
+# Example:
+# .env.local: VAEQL_S3_SSE_CUSTOMER_KEY_B64=<base64-encoded-key>
+# shell: set -a; source .env.local; set +a
 SSE_CUSTOMER_KEY_ENV_VAR = "VAEQL_S3_SSE_CUSTOMER_KEY_B64"
+# Example step module path: `VAEQL_plus.step1_preprocessing`
+_STEP_MODULE_PATTERN = re.compile(r"(?:[A-Za-z_]\w*\.)*step[1-9]\d*_[A-Za-z0-9_]+")
 
 
 class AWS_Batch_Interface:
@@ -49,8 +59,8 @@ class AWS_Batch_Interface:
         arguments: Sequence[str] = (),
     ) -> list[str]:
         """Build the default command for a Python ``stepX_X`` module."""
-        if not step_module or step_module.startswith("-"):
-            raise ValueError("step_module must be a non-empty Python module path")
+        if not _STEP_MODULE_PATTERN.fullmatch(step_module):
+            raise ValueError("step_module must be a dotted VAEQL step module path")
         return ["python", "-m", step_module, *[str(argument) for argument in arguments]]
 
     @staticmethod
@@ -99,6 +109,8 @@ class AWS_Batch_Interface:
             request["parameters"] = {str(name): str(value) for name, value in parameters.items()}
         if depends_on:
             request["dependsOn"] = [{"jobId": str(job_id)} for job_id in depends_on]
+        # AWS Batch array jobs must contain 2 to 10,000 child jobs; 
+        # an array of one is not considered a valid array job
         if array_size is not None:
             if array_size < 2 or array_size > 10_000:
                 raise ValueError("array_size must be between 2 and 10000")
