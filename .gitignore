@@ -5,7 +5,7 @@ Awan_2022_*mputed_datasets/
 *.lock
 **/prompts/*
 !**/prompts/non_ignored/
-__pycache__/
+**/__pycache__/
 **/.cache/
 **/.pytest_cache/
 **/.codex

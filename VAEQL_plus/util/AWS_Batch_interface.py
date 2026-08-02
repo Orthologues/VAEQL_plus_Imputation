@@ -28,8 +28,10 @@ from typing import Any
 # .env.local: VAEQL_S3_SSE_CUSTOMER_KEY_B64=<base64-encoded-key>
 # shell: set -a; source .env.local; set +a
 SSE_CUSTOMER_KEY_ENV_VAR = "VAEQL_S3_SSE_CUSTOMER_KEY_B64"
-# Example step module path: `VAEQL_plus.step1_preprocessing`
-_STEP_MODULE_PATTERN = re.compile(r"(?:[A-Za-z_]\w*\.)*step[1-9]\d*_[A-Za-z0-9_]+")
+# Example step module paths: `VAEQL_plus.step0_SLM_metadata_profiling.feature_type_profiling` and `VAEQL_plus.step1_preprocessing`.
+_STEP_MODULE_PATTERN = re.compile(
+    r"(?:[A-Za-z_]\w*\.)*step[0-9]\d*_[A-Za-z0-9_]+(?:\.[A-Za-z_]\w*)*"
+)
 
 
 class AWS_Batch_Interface:

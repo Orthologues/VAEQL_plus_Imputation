@@ -93,6 +93,12 @@ def test_batch_request_contains_step_command_and_environment() -> None:
     ]
     assert request["retryStrategy"] == {"attempts": 2}
 
+    assert batch.build_step_command("VAEQL_plus.step0_SLM_metadata_profiling") == [
+        "python",
+        "-m",
+        "VAEQL_plus.step0_SLM_metadata_profiling",
+    ]
+
 
 @pytest.mark.parametrize("step_module", ["", "step1", "VAEQL_plus.step1", "-step1_preprocessing"])
 def test_build_step_command_rejects_invalid_step_modules(step_module: str) -> None:
