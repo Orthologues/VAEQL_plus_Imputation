@@ -18,7 +18,7 @@ nextflow.enable.dsl=2
  *
  * Example AWS launch, after supplying a deployment config and commands:
  *   nextflow run VAEQL_plus/conf/nextflow_conf.nf \
- *     -c VAEQL_plus/conf/nextflow_aws.config \
+ *     -c VAEQL_plus/conf/nextflow_aws.conf \
  *     --reference_pds_mount /mnt/pds/trial.csv \
  *     --phase1_manifest_uri s3://bucket/metadata/trial.json \
  *     --step1_command 'python -m <approved_step1_entrypoint>' \

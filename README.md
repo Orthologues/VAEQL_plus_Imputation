@@ -24,17 +24,27 @@ future medical-related CS/ML conference publication.
 ## Repository Layout
 
 ```text
-VAEQL_plus/                 main package
-VAEQL_plus/beta_DVAE/       $\beta$-VAE model, training wrapper, tuning notes
-VAEQL_plus/step1_preprocessing/
-                             feature preprocessing utilities
-VAEQL_plus/step2_beta_C_tuning/
-                             $\beta$/C tuning entry points
-VAEQL_plus/util/             AWS Batch/S3 interfaces and shared utilities
-VAEQL_plus/tests/           smoke tests and other miscellaneous tests
-baseline_papers/            reference papers
-AWS_dev_notes.md            infrastructure and data-governance notes
+VAEQL_plus/                         main package
+VAEQL_plus/beta_DVAE/               $\beta$-VAE model, training wrapper, and notes
+VAEQL_plus/conf/                    model parameters, feature types, and Nextflow profiles
+VAEQL_plus/conf/nextflow_conf.nf    preliminary Step 0-to-Step 3 workflow
+VAEQL_plus/step0_SLM_metadata_profiling/
+                                     Ministral 8B feature-type profiling scaffold
+VAEQL_plus/step1_preprocessing/     feature preprocessing utilities and specification
+VAEQL_plus/step2_beta_C_tuning/     $\beta$/C tuning entry points and pseudo-algorithm
+VAEQL_plus/util/                    AWS Batch/S3 interfaces and shared utilities
+VAEQL_plus/tests/                   AWS, Step 0, import, and neural-network tests
+baseline_papers/                    reference papers
+Codex_drafts/                       development prompts and research drafts
+drafts_private/                     ignored private research plans
+AWS_dev_notes.md                    infrastructure and data-governance notes
+VAEQL_plus/research_todos.md        active research roadmap
+pytest.ini                          test discovery and pytest configuration
+ml_env_gpu.yml                      Conda environment specification
 ```
+
+The current Nextflow scaffold calls Step 3 through a configured command
+adapter; a dedicated `VAEQL_plus/step3_*` package has not yet been added.
 
 ## Setup
 
