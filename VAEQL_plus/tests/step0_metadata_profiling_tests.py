@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -18,6 +19,7 @@ from VAEQL_plus.step0_SLM_metadata_profiling.feature_type_profiling import (
     DEFAULT_MODEL_NAME,
     build_profile_manifest,
     parse_profile_response,
+    run_feature_type_profiling,
     summarize_tabular_file,
     submit_feature_type_profiling_job,
 )
@@ -106,3 +108,57 @@ def test_submit_step0_job_forwards_s3_uris_and_key() -> None:
     assert client.submitted["containerOverrides"]["environment"] == [
         {"name": SSE_CUSTOMER_KEY_ENV_VAR, "value": "encoded-key"}
     ]
+
+
+def test_step0_reads_a_mountpoint_path_and_writes_a_local_manifest_copy(tmp_path, monkeypatch) -> None:
+    from VAEQL_plus.step0_SLM_metadata_profiling import feature_type_profiling as module
+
+    source = tmp_path / "trial.csv"
+    source.write_text("age\n61\n62\n", encoding="utf-8")
+    local_manifest = tmp_path / "phase1" / "manifest.json"
+    writes: list[dict] = []
+
+    class FakeS3:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        @staticmethod
+        def parse_s3_uri(uri: str) -> tuple[str, str]:
+            assert uri == "s3://pds/metadata/trial.json"
+            return "pds", "metadata/trial.json"
+
+        def write_json_metadata(self, payload, bucket: str, key: str) -> str:
+            writes.append(payload)
+            return f"s3://{bucket}/{key}"
+
+    class FakeProfiler:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["model_name"] == DEFAULT_MODEL_NAME
+
+        def profile(self, schema_summary, metadata_bundle):
+            assert schema_summary["source_file"] == "trial.csv"
+            assert metadata_bundle == []
+            return [
+                {
+                    "source_feature": "age",
+                    "canonical_feature": "age",
+                    "model_type": "continuous",
+                    "confidence": 0.9,
+                }
+            ]
+
+    monkeypatch.setattr(module, "AWS_S3_Interface", FakeS3)
+    monkeypatch.setattr(module, "MinistralFeatureTypeProfiler", FakeProfiler)
+    monkeypatch.setenv(SSE_CUSTOMER_KEY_ENV_VAR, base64.b64encode(bytes(range(32))).decode("ascii"))
+
+    output_uri = run_feature_type_profiling(
+        None,
+        "s3://pds/metadata/trial.json",
+        input_path=source,
+        manifest_path=local_manifest,
+    )
+
+    assert output_uri == "s3://pds/metadata/trial.json"
+    assert local_manifest.is_file()
+    assert json.loads(local_manifest.read_text(encoding="utf-8"))["source_reference"] == "mountpoint://trial.csv"
+    assert writes[0]["source_s3_uri"] is None

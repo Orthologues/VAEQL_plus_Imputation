@@ -217,16 +217,20 @@ def parse_profile_response(
 
 def build_profile_manifest(
     *,
-    source_s3_uri: str,
+    source_s3_uri: str | None = None,
+    source_reference: str | None = None,
     model_name: str,
     schema_summary: Mapping[str, Any],
     features: Sequence[Mapping[str, Any]],
     metadata_s3_uris: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Build a versioned manifest that cannot be consumed without human review."""
+    if not source_s3_uri and not source_reference:
+        raise ValueError("source_s3_uri or source_reference must be provided")
     return {
         "schema_version": "0.1",
         "source_s3_uri": source_s3_uri,
+        "source_reference": source_reference or source_s3_uri,
         "model_name": model_name,
         "profile_status": "pending_human_review",
         "human_review_required": True,
@@ -294,13 +298,15 @@ class MinistralFeatureTypeProfiler:
 
 
 def run_feature_type_profiling(
-    input_s3_uri: str,
+    input_s3_uri: str | None,
     output_s3_uri: str,
     *,
+    input_path: str | Path | None = None,
     metadata_s3_uris: Sequence[str] = (),
     model_name: str = DEFAULT_MODEL_NAME,
     region_name: str | None = None,
     max_rows: int = 256,
+    manifest_path: str | Path | None = None,
 ) -> str:
     """Run Step 0 in AWS Batch and write its SSE-C-protected review manifest.
 
@@ -312,21 +318,29 @@ def run_feature_type_profiling(
         raise RuntimeError(
             f"{SSE_CUSTOMER_KEY_ENV_VAR} must be set in the AWS Batch container environment"
         )
+    if (input_s3_uri is None) == (input_path is None):
+        raise ValueError("provide exactly one of input_s3_uri or input_path")
+
     s3 = AWS_S3_Interface(
         sse_customer_key_b64=sse_customer_key_b64,
         region_name=region_name,
     )
-    _, input_key = s3.parse_s3_uri(input_s3_uri)
     output_bucket, output_key = s3.parse_s3_uri(output_s3_uri)
     with tempfile.TemporaryDirectory(prefix="vaeql_step0_") as temp_dir:
-        input_suffix = Path(input_key).suffix.lower() or ".csv"
-        input_path = s3.download_file(
-            input_s3_uri,
-            Path(temp_dir) / f"pds_trial_input{input_suffix}",
-        )
+        if input_path is not None:
+            local_input_path = Path(input_path)
+            if not local_input_path.is_file():
+                raise FileNotFoundError(local_input_path)
+        else:
+            _, input_key = s3.parse_s3_uri(input_s3_uri or "")
+            input_suffix = Path(input_key).suffix.lower() or ".csv"
+            local_input_path = s3.download_file(
+                input_s3_uri or "",
+                Path(temp_dir) / f"pds_trial_input{input_suffix}",
+            )
         metadata_paths: list[Path] = []
         for index, metadata_uri in enumerate(metadata_s3_uris):
-            if metadata_uri == input_s3_uri:
+            if input_s3_uri is not None and metadata_uri == input_s3_uri:
                 raise ValueError("metadata_s3_uris must exclude the raw input URI")
             _, metadata_key = s3.parse_s3_uri(metadata_uri)
             metadata_suffix = Path(metadata_key).suffix.lower() or ".metadata"
@@ -336,7 +350,7 @@ def run_feature_type_profiling(
                     Path(temp_dir) / f"metadata_{index}{metadata_suffix}",
                 )
             )
-        schema_summary = summarize_raw_data_with_pandas(input_path, max_rows=max_rows)
+        schema_summary = summarize_raw_data_with_pandas(local_input_path, max_rows=max_rows)
         metadata_bundle = build_metadata_bundle(
             metadata_paths,
             source_uris=metadata_s3_uris,
@@ -347,12 +361,25 @@ def run_feature_type_profiling(
         )
         manifest = build_profile_manifest(
             source_s3_uri=input_s3_uri,
+            source_reference=(
+                f"mountpoint://{local_input_path.name}"
+                if input_path is not None
+                else input_s3_uri
+            ),
             model_name=model_name,
             schema_summary=schema_summary,
             features=features,
             metadata_s3_uris=metadata_s3_uris,
         )
-        return s3.write_json_metadata(manifest, output_bucket, output_key)
+        output_uri = s3.write_json_metadata(manifest, output_bucket, output_key)
+        if manifest_path is not None:
+            local_manifest_path = Path(manifest_path)
+            local_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            local_manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return output_uri
 
 
 def submit_feature_type_profiling_job(
@@ -361,8 +388,9 @@ def submit_feature_type_profiling_job(
     job_name: str,
     job_queue: str,
     job_definition: str,
-    input_s3_uri: str,
     output_s3_uri: str,
+    input_s3_uri: str | None = None,
+    input_path: str | Path | None = None,
     metadata_s3_uris: Sequence[str] = (),
     model_name: str = DEFAULT_MODEL_NAME,
     sse_customer_key_b64: str | None = None,
@@ -374,14 +402,13 @@ def submit_feature_type_profiling_job(
     The supplied job definition must request the GPU resources required by the
     selected SLM image; this helper only submits the job.
     """
-    AWS_S3_Interface.parse_s3_uri(input_s3_uri)
+    if (input_s3_uri is None) == (input_path is None):
+        raise ValueError("provide exactly one of input_s3_uri or input_path")
+    if input_s3_uri is not None:
+        AWS_S3_Interface.parse_s3_uri(input_s3_uri)
     AWS_S3_Interface.parse_s3_uri(output_s3_uri)
-    arguments = [
-        "--input-uri",
-        input_s3_uri,
-        "--output-uri",
-        output_s3_uri,
-    ]
+    input_arguments = ["--input-uri", input_s3_uri] if input_s3_uri else ["--input-path", str(input_path)]
+    arguments = [*input_arguments, "--output-uri", output_s3_uri]
     for metadata_uri in metadata_s3_uris:
         arguments.extend(("--metadata-uri", metadata_uri))
     arguments.extend(("--model-name", model_name))
@@ -400,8 +427,11 @@ def submit_feature_type_profiling_job(
 def main() -> None:
     """Run the Batch-container entry point for Step 0."""
     parser = argparse.ArgumentParser(description="Profile PDS feature types with Ministral on AWS Batch")
-    parser.add_argument("--input-uri", required=True, help="SSE-C-protected input S3 URI")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input-uri", help="SSE-C-protected input S3 URI")
+    input_group.add_argument("--input-path", help="Read-only PDS path exposed by an AWS S3 Mountpoint")
     parser.add_argument("--output-uri", required=True, help="SSE-C-protected output manifest S3 URI")
+    parser.add_argument("--manifest-path", default=None, help="Optional local copy of the manifest for workflow channels")
     parser.add_argument(
         "--metadata-uri",
         action="append",
@@ -415,10 +445,12 @@ def main() -> None:
     run_feature_type_profiling(
         args.input_uri,
         args.output_uri,
+        input_path=args.input_path,
         metadata_s3_uris=args.metadata_uri,
         model_name=args.model_name,
         region_name=args.region_name,
         max_rows=args.max_rows,
+        manifest_path=args.manifest_path,
     )
 
 

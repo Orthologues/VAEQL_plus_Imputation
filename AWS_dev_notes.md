@@ -184,6 +184,48 @@ Each run should retain:
 - transformed-space evaluation metrics;
 - selected raw-scale metrics for clinically important features.
 
+## `Nextflow` Integration with AWS S3 Mount and AWS Batch
+
+Nextflow is the orchestration layer for the modular imputation workflow. It
+should connect independent `stepX_X` modules, submit each process to AWS Batch, and publish versioned outputs including evaluation logs and GPU computing time. The scientific
+and data-processing logic remains in Python modules under `VAEQL_plus`; a
+Nextflow process should call a stable module entry point at `__init__.py` files under each `VAEQL_plus.stepX_X` module.
+
+Each process must declare an explicit input and output contract. Use the NF Dataflow Channels
+for artifacts, e.g., models and logs produced by an upstream process, and pass the dataset version,
+configuration URI pegged to a series of run IDs, run ID, and review status explicitly between steps. Do not depend on an undeclared shared local directory or on files left behind by an
+earlier process. A process should write its outputs to its isolated and idempotent work
+directory identifiable by a configuration URI, publish only idempotent and versioned artifacts to the configured S3 run path for each run ID.
+
+`VAEQL_plus/conf/nextflow_conf.nf` currently provides a preliminary beta/C
+tuning workflow wrapper. Future modular workflows should extend this pattern
+with separate processes for Step 0 metadata profiling, Step 1 preprocessing,
+Step 2 beta/C tuning, Step 3 DRL training, and evaluation. The AWS deployment
+configuration must select the AWS Batch executor, approved container images,
+job queues, CPU/GPU resources, memory, timeout, retry, and IAM settings without
+putting private data or encryption keys in the workflow file.
+
+Mountpoint for Amazon S3 is an optional optimization for large, read-heavy,
+static reference data. It is not a replacement for the repository's
+`AWS_S3_Interface`, manifest validation, or versioned artifact handoff. When a
+Mountpoint path is used as a static reference, pass that path as a Nextflow
+`val` input; use ordinary `path` inputs for files that Nextflow must stage and
+track as process artifacts.
+
+The PDS and run objects in this project use SSE-C. Mountpoint access must not be
+assumed to support the project's Base64-encoded SSE-C customer key, because its
+documented authentication path is IAM-based and the key-injection contract has
+not been validated here. Until a dedicated AWS integration test proves
+otherwise, read and write SSE-C-protected objects through
+`AWS_S3_Interface`, with `VAEQL_S3_SSE_CUSTOMER_KEY_B64` supplied only through
+the approved Batch runtime environment. Never place the key in a Nextflow
+parameter, command line, log, or published artifact.
+
+See the AWS guidance on [Nextflow with AWS Batch and Mountpoint for Amazon
+S3](https://aws.amazon.com/blogs/hpc/optimize-nextflow-workflows-on-aws-batch-with-mountpoint-for-amazon-s3/),
+[Mountpoint for Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mountpoint.html),
+and [S3 SSE-C](https://docs.aws.amazon.com/AmazonS3/latest/userguide/specifying-s3-c-encryption.html).
+
 ## Next Tasks
 
 1. Define the Phase 1 and Phase 2 S3 paths, Batch job queue, GPU compute
