@@ -42,6 +42,7 @@ class AWS_S3_Interface:
     ) -> None:
         self.region_name = region_name
         self.client = client
+        self.sse_customer_key_b64 = sse_customer_key_b64
         self.sse_customer_key, self.sse_customer_key_md5 = self._prepare_sse_c_key(
             sse_customer_key_b64
         )
@@ -72,7 +73,8 @@ class AWS_S3_Interface:
         """Return the SSE-C headers required for each S3 request."""
         return {
             "SSECustomerAlgorithm": _SSE_C_ALGORITHM,
-            "SSECustomerKey": self.sse_customer_key,
+            # boto3 expects the customer key as its original Base64 string.
+            "SSECustomerKey": self.sse_customer_key_b64,
             "SSECustomerKeyMD5": self.sse_customer_key_md5,
         }
 

@@ -60,7 +60,7 @@ class FakeS3Client:
             "Bucket": "bucket",
             "Key": "metadata.json",
             "SSECustomerAlgorithm": "AES256",
-            "SSECustomerKey": SSE_C_KEY,
+            "SSECustomerKey": SSE_C_KEY_B64,
             "SSECustomerKeyMD5": SSE_C_KEY_MD5_B64,
         }
         return {"Body": io.BytesIO(b'{"run_id": "run-1"}')}
@@ -177,7 +177,7 @@ def test_s3_writes_use_injected_client_and_sse_c(tmp_path) -> None:
     assert uri == "s3://bucket/runs/run-1/artifact.bin"
     _, kwargs = client.uploaded
     assert kwargs["ExtraArgs"]["SSECustomerAlgorithm"] == "AES256"
-    assert kwargs["ExtraArgs"]["SSECustomerKey"] == SSE_C_KEY
+    assert kwargs["ExtraArgs"]["SSECustomerKey"] == SSE_C_KEY_B64
     assert kwargs["ExtraArgs"]["SSECustomerKeyMD5"] == SSE_C_KEY_MD5_B64
     assert kwargs["ExtraArgs"]["ChecksumAlgorithm"] == "SHA256"
 
@@ -189,7 +189,7 @@ def test_s3_writes_use_injected_client_and_sse_c(tmp_path) -> None:
     assert metadata_uri == "s3://bucket/metadata.json"
     assert json.loads(client.put_request["Body"]) == {"run_id": "run-1"}
     assert client.put_request["SSECustomerAlgorithm"] == "AES256"
-    assert client.put_request["SSECustomerKey"] == SSE_C_KEY
+    assert client.put_request["SSECustomerKey"] == SSE_C_KEY_B64
     assert client.put_request["SSECustomerKeyMD5"] == SSE_C_KEY_MD5_B64
     assert client.put_request["ChecksumAlgorithm"] == "SHA256"
 
@@ -209,7 +209,7 @@ def test_s3_file_download_uses_sse_c(tmp_path) -> None:
     assert args == ("bucket", "artifact.bin", str(destination))
     assert kwargs["ExtraArgs"] == {
         "SSECustomerAlgorithm": "AES256",
-        "SSECustomerKey": SSE_C_KEY,
+        "SSECustomerKey": SSE_C_KEY_B64,
         "SSECustomerKeyMD5": SSE_C_KEY_MD5_B64,
     }
 
