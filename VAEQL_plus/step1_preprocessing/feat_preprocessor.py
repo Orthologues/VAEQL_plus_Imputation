@@ -23,18 +23,19 @@
 #########################################################
 
 
+from __future__ import annotations
+
+
 import os
 import re
 from collections import namedtuple
-from typing import Dict, List, Sequence, Tuple, Union, Set, FrozenSet
+from typing import TYPE_CHECKING, Dict, FrozenSet, List, Sequence, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import torch
 from pandas import DataFrame
 from pyampute.ampute import MultivariateAmputation
-from pyspark.sql import DataFrame as SparkDataFrame
-from pyspark.sql import functions as F
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import IterativeImputer
@@ -43,6 +44,9 @@ from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScale
 from torch import Tensor
 
 from ..conf import FeaturesTypeDict
+
+if TYPE_CHECKING:
+    from pyspark.sql import DataFrame as SparkDataFrame
 
 
 OrderedFeature = namedtuple("OrderedFeature", ["name", "feat_type", "base_feat"])
@@ -69,8 +73,16 @@ class FeaturePreprocessor:
 
         if input_df is None:
             raise ValueError("input_df cannot be None, a DataFrame must be provided for preprocessing")
-        if use_spark and not isinstance(input_df, SparkDataFrame):
-            raise TypeError("Expected a Spark DataFrame when use_spark is True")
+        if use_spark:
+            try:
+                from pyspark.sql import DataFrame as SparkDataFrame
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "pyspark is required only when use_spark=True; install it in "
+                    "the preprocessing runtime or use the pandas backend."
+                ) from exc
+            if not isinstance(input_df, SparkDataFrame):
+                raise TypeError("Expected a Spark DataFrame when use_spark is True")
         if not use_spark and not isinstance(input_df, DataFrame):
             raise TypeError("Expected a pandas DataFrame when use_spark is False")
         self.input_df = input_df
@@ -209,6 +221,8 @@ class FeaturePreprocessor:
     # Post-scale clipping to [-5, 5] reduces extreme outliers before model training.
     def _transform_real(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
+            from pyspark.sql import functions as F
+
             pre_df = self.input_df.select(
                 *[F.col(col).cast("double").alias(col) for col in cols]
             ).toPandas()
@@ -234,6 +248,8 @@ class FeaturePreprocessor:
     # Post-transform clipping to [-5, 5] reduces extreme outliers before model training.
     def _transform_pos_real(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
+            from pyspark.sql import functions as F
+
             pre_df = self.input_df.select(
                 *[F.greatest(F.col(col).cast("double"), F.lit(0.0)).alias(col) for col in cols]
             ).toPandas()
@@ -265,6 +281,8 @@ class FeaturePreprocessor:
     # Transform stage here: log1p transform with clipping to [-5, 5].
     def _transform_count(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
+            from pyspark.sql import functions as F
+
             pre_df = self.input_df.select(
                 *[F.greatest(F.col(col).cast("double"), F.lit(0.0)).alias(col) for col in cols]
             ).toPandas().apply(pd.to_numeric, errors="coerce")

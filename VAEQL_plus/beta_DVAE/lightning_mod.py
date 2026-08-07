@@ -21,8 +21,8 @@ Author: Jiawei Zhao (jiz@imada.sdu.dk)
 Date: 2026-04-01
 """
 
+import fcntl
 import os
-import portalocker  # OS-level advisory lock with timeout; safer than sleep-polling lock files.
 import math
 import re
 import io
@@ -312,19 +312,23 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
 
         # The branch of storing result on the local filesystem with file locking to ensure safe concurrent appends by multi-processes;
         # holds an OS-level advisory lock to serialize read/append/write cycles.
-        with portalocker.Lock(lock_path, mode="a+", timeout=2):
-            if not os.path.exists(results_path):
-                with open(results_path, 'w') as fh:
-                    fh.write('beta,C,epoch,selection_metric_name,mae,rmse,multi_mae,multi_rmse,'
-                             'kl_disc,kl_cont,'
-                             'prop_80q,prop_90q,prop_95q,prop_99q,fold_idx\n')
-        
-            df_prev = pd.read_csv(results_path)
-        
-            info_row = _new_imputation_info_dict()
-        
-            df_prev = pd.concat([df_prev, pd.DataFrame([info_row])], ignore_index=True)
-            df_prev.to_csv(results_path, index=False)
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                if not os.path.exists(results_path):
+                    with open(results_path, "w", encoding="utf-8") as fh:
+                        fh.write('beta,C,epoch,selection_metric_name,mae,rmse,multi_mae,multi_rmse,'
+                                 'kl_disc,kl_cont,'
+                                 'prop_80q,prop_90q,prop_95q,prop_99q,fold_idx\n')
+
+                df_prev = pd.read_csv(results_path)
+
+                info_row = _new_imputation_info_dict()
+
+                df_prev = pd.concat([df_prev, pd.DataFrame([info_row])], ignore_index=True)
+                df_prev.to_csv(results_path, index=False)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     
     
     @staticmethod

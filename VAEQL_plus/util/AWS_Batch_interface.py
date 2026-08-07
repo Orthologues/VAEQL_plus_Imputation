@@ -18,8 +18,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-# Constants
-
 # Documentation: https://docs.aws.amazon.com/batch/latest/userguide/specifying-sensitive-data-secrets.html
 # Local setup: store one Base64-encoded 32-byte AES key in an ignored env file:
 # VAEQL_S3_SSE_CUSTOMER_KEY_B64=<base64-encoded-key>
@@ -35,8 +33,21 @@ _STEP_MODULE_PATTERN = re.compile(
 
 
 class AWS_Batch_Interface:
-    def __init__(self, *, region_name: str | None = None, client: Any | None = None) -> None:
+    """Submit jobs to a previously provisioned AWS Batch environment.
+
+    The AWS account, IAM roles, networking, compute environment, job queue, and
+    job definition must be configured before this interface submits a job.
+    """
+
+    def __init__(
+        self,
+        *,
+        region_name: str | None = None,
+        profile_name: str | None = None,
+        client: Any | None = None,
+    ) -> None:
         self.region_name = region_name
+        self.profile_name = profile_name
         self.client = client
 
     # Boilerplate methods
@@ -46,12 +57,24 @@ class AWS_Batch_Interface:
             return self.client
         try:
             import boto3
+            from botocore.exceptions import NoRegionError, ProfileNotFound
         except ModuleNotFoundError as exc:  # pragma: no cover - environment-specific
             raise RuntimeError(
                 "boto3 is required for AWS Batch operations; install the project "
                 "environment before submitting a job."
             ) from exc
-        self.client = boto3.client("batch", region_name=self.region_name)
+        try:
+            session = boto3.Session(
+                profile_name=self.profile_name,
+                region_name=self.region_name,
+            )
+            self.client = session.client("batch")
+        except (NoRegionError, ProfileNotFound) as exc:  # pragma: no cover - local setup
+            raise RuntimeError(
+                "AWS Batch client setup failed; configure a valid AWS profile or "
+                "IAM role and region before submitting a job. See "
+                "'https://docs.aws.amazon.com/batch/latest/userguide/get-set-up-for-aws-batch.html'"
+            ) from exc
         return self.client
 
     @staticmethod

@@ -69,6 +69,9 @@ pytest VAEQL_plus/tests/nn_smoke_tests.py -q
   review data-use constraints before making any derived data public.
 - The current method should be described as a hybrid type-aware reconstruction
   objective, not as a fully likelihood-native HI-VAE implementation.
+- Reference Link for pipeline integration of AWS Batch, AWS S3 and Nextflow: <a>https://aws.amazon.com/blogs/hpc/optimize-nextflow-workflows-on-aws-batch-with-mountpoint-for-amazon-s3/</a>
+- Reference Link for setting up AWS Batch HPC environment: <a>https://docs.aws.amazon.com/batch/latest/userguide/get-set-up-for-aws-batch.html</a>
+- Installation guide of Nextflow at an on-premise server: <a>https://docs.seqera.io/nextflow/install</a>
 
 ## License
 

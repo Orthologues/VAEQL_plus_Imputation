@@ -41,9 +41,10 @@ dependencies:
       - stable-baselines3
       - ucimlrepo
       - mlflow
-      - pyspark
       - pyreadstat
       - lightning
-      - portalocker
       - boto3
       - setuptools
+
+      # Optional large-dataset preprocessing backend: install pyspark only when
+      # the RAM-scaled pandas row limit selects it.

@@ -66,6 +66,19 @@ class FakeS3Client:
         return {"Body": io.BytesIO(b'{"run_id": "run-1"}')}
 
 
+def test_batch_interface_preserves_local_aws_configuration() -> None:
+    client = FakeBatchClient()
+    batch = AWS_Batch_Interface(
+        region_name="eu-central-1",
+        profile_name="vaeql-research",
+        client=client,
+    )
+
+    assert batch.region_name == "eu-central-1"
+    assert batch.profile_name == "vaeql-research"
+    assert batch._batch_client() is client
+
+
 def test_batch_request_contains_step_command_and_environment() -> None:
     assert SSE_CUSTOMER_KEY_ENV_VAR == "VAEQL_S3_SSE_CUSTOMER_KEY_B64"
     batch = AWS_Batch_Interface()

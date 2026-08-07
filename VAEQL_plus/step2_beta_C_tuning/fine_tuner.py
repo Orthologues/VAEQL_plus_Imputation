@@ -21,7 +21,7 @@ import json
 import sys
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Literal, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,7 @@ from VAEQL_plus.conf.config import DisentangledBetaVaeTuningConfig
 from VAEQL_plus.step1_preprocessing.feat_preprocessor import FeaturePreprocessor
 from VAEQL_plus.beta_DVAE.lightning_mod import BetaGausMixedDVAETrainer
 from VAEQL_plus.beta_DVAE.torch_nn import BetaGausMixedDVAE
+from VAEQL_plus.util.dataset_loader import load_dataset
 
 
 def _available_devices() -> list[str]:
@@ -229,6 +230,7 @@ def build_cv_matrices(
     pre_imputation_max_iter: int,
     mice_num_imputations: int,
     random_forest_n_estimators: int,
+    preprocessing_engine: Literal["auto", "pandas", "pyspark"] = "auto",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     Build:
@@ -237,15 +239,20 @@ def build_cv_matrices(
       - mask            : 0 observed / 1 pre-existing NaN / 2 newly amputed
       - model_feat_dict : feature-type metadata aligned to preprocessed columns
     """
-    raw_df = pd.read_csv(input_csv)
     feat_dict = FeaturesTypeDict.create(str(feature_dict_json))
+    raw_df = load_dataset(
+        str(input_csv),
+        feat_dict,
+        engine=preprocessing_engine,
+    )
+    use_spark = not isinstance(raw_df, pd.DataFrame)
 
     preprocessor = FeaturePreprocessor(
         feat_dict=feat_dict,
         missing_mechanism=missing_mechanism,
         missing_rate=missing_rate,
         input_df=raw_df,
-        use_spark=False,
+        use_spark=use_spark,
         pre_imputation_method=pre_imputation_method,
         pre_imputation_max_iter=pre_imputation_max_iter,
         mice_num_imputations=mice_num_imputations,
@@ -332,6 +339,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pre_imputation_max_iter", type=int, default=5)
     parser.add_argument("--mice_num_imputations", type=int, default=5)
     parser.add_argument("--random_forest_n_estimators", type=int, default=100)
+    parser.add_argument(
+        "--preprocessing_engine",
+        choices=["auto", "pandas", "pyspark"],
+        default="auto",
+        help=(
+            "Use pandas, PySpark, or RAM-scaled automatic selection; auto uses "
+            "one million rows per 16 GiB as the pandas limit"
+        ),
+    )
 
     parser.add_argument("--k_folds", type=int, default=None)
     parser.add_argument("--results_path", type=Path, default=REPO_ROOT / "VAEQL_plus" / "step1_beta_C_tuning" / "beta_C_halving_mae.csv")
@@ -356,6 +372,7 @@ def main() -> None:
         pre_imputation_max_iter=int(args.pre_imputation_max_iter),
         mice_num_imputations=int(args.mice_num_imputations),
         random_forest_n_estimators=int(args.random_forest_n_estimators),
+        preprocessing_engine=args.preprocessing_engine,
     )
 
     config = load_and_patch_cv_config(
