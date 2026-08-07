@@ -32,6 +32,8 @@ VAEQL_plus/step0_SLM_metadata_profiling/
                                      Ministral 8B feature-type profiling scaffold
 VAEQL_plus/step1_preprocessing/     feature preprocessing utilities and specification
 VAEQL_plus/step2_beta_C_tuning/     $\beta$/C tuning entry points and pseudo-algorithm
+VAEQL_plus/step3_training_and_imputation/
+                                     placeholder for DRL training and imputation
 VAEQL_plus/util/                    AWS Batch/S3 interfaces and shared utilities
 VAEQL_plus/tests/                   AWS, Step 0, import, and neural-network tests
 baseline_papers/                    reference papers
@@ -44,7 +46,9 @@ ml_env_gpu.yml                      Conda environment specification
 ```
 
 The current Nextflow scaffold calls Step 3 through a configured command
-adapter; a dedicated `VAEQL_plus/step3_*` package has not yet been added.
+adapter. `VAEQL_plus/step3_training_and_imputation` currently contains only a
+placeholder `__init__.py`; the DRL training and imputation algorithms remain to
+be implemented.
 
 ## Setup
 

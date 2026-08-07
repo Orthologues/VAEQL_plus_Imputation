@@ -46,8 +46,6 @@ def _machine_memory_bytes() -> int:
             raw_limit = limit_path.read_text(encoding="ascii").strip()
         except (FileNotFoundError, OSError):
             continue
-        if raw_limit == "max":
-            continue
         try:
             limit = int(raw_limit)
         except ValueError:
