@@ -50,7 +50,7 @@ class AWS_S3_Interface:
     # Boilerplate methods
     @staticmethod
     def _prepare_sse_c_key(sse_customer_key_b64: str) -> tuple[bytes, str]:
-        """Validate a base64 key, decode it for boto3, and calculate its MD5."""
+        """Validate the Base64 key, decode it for validation and MD5 calculation."""
         if not isinstance(sse_customer_key_b64, str) or not sse_customer_key_b64:
             raise ValueError("sse_customer_key_b64 must be a non-empty base64 string")
         try:
@@ -103,6 +103,9 @@ class AWS_S3_Interface:
         # Require the S3 scheme, a non-empty bucket, and a non-empty object key.
         if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
             raise ValueError(f"Expected an S3 URI in the form s3://bucket/key, got {uri!r}")
+        ## CHANGELOG: add example strings for the two returned str values
+        # Example: s3://example-bucket/path/to/file.csv ->
+        # ("example-bucket", "path/to/file.csv")
         return parsed.netloc, parsed.path.lstrip("/")
 
     @staticmethod
