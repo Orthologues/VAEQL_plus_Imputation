@@ -4,7 +4,6 @@ Convenience re-exports for VAEQL utility helpers with lazy loading.
 
 from importlib import import_module
 
-## CHANGELOG: add AWS interface classes to the static set of classes here
 __methods__ = ["load_dataset", "load_pandas", "load_pyspark"]
 __classes__ = [
     "ReplayBuffer",
@@ -14,7 +13,6 @@ __classes__ = [
 ]
 __all__ = __methods__ + __classes__
 
-## QUESTIONLOG: so the feat_preprocessor class could be imported from both `.step1_preprocessing.FeaturePreprocessor` and `utils.FeaturePreprocessor`?
 _EXPORT_MODULES = {
     "load_dataset": ".dataset_loader",
     "load_pandas": ".dataset_loader",

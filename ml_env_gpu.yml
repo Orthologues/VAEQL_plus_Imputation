@@ -6,6 +6,8 @@
 #conda activate ml_env_gpu
 #conda config --env --set channel_priority strict
 #python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# OR
+#conda env update --name ml_env_gpu --file ml_env_gpu.yml && conda activate ml_env_gpu
 
 
 name: ml_env_gpu
@@ -44,6 +46,14 @@ dependencies:
       - pyreadstat
       - lightning
       - boto3
+      - transformers
+      - accelerate
+      - mistral-common
+      - pymupdf
+      - python-docx
+      - textract
+      - openpyxl
+      - xlrd
       - setuptools
 
       # Optional large-dataset preprocessing backend: install pyspark only when

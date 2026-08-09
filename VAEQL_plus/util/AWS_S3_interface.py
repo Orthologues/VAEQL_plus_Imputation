@@ -103,7 +103,6 @@ class AWS_S3_Interface:
         # Require the S3 scheme, a non-empty bucket, and a non-empty object key.
         if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
             raise ValueError(f"Expected an S3 URI in the form s3://bucket/key, got {uri!r}")
-        ## CHANGELOG: add example strings for the two returned str values
         # Example: s3://example-bucket/path/to/file.csv ->
         # ("example-bucket", "path/to/file.csv")
         return parsed.netloc, parsed.path.lstrip("/")

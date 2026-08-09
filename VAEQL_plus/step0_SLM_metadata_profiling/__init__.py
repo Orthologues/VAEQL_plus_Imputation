@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-__all__ = [
-    "DEFAULT_MODEL_NAME",
-    "JOB_MODULE",
-    "MinistralFeatureTypeProfiler",
-    "build_profile_manifest",
-    "parse_profile_response",
+__constants__ = ["DEFAULT_MODEL_NAME", "ALTERNATIVE_MODEL_NAMES", "ALLOWED_MODEL_TYPES"]
+__classes__ = ["FeatureTypeProfiler", "FeatureTypeProfilingBySLM"]
+__methods__ = [
     "run_feature_type_profiling",
     "submit_feature_type_profiling_job",
 ]
+__all__ = __constants__ + __classes__ + __methods__
 
 
 def __getattr__(name: str):

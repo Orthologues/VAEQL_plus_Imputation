@@ -17,10 +17,9 @@ import pytest
 
 from VAEQL_plus.step0_SLM_metadata_profiling.feature_type_profiling import (
     DEFAULT_MODEL_NAME,
-    build_profile_manifest,
-    parse_profile_response,
+    FeatureTypeProfiler,
+    FeatureTypeProfilingBySLM,
     run_feature_type_profiling,
-    summarize_tabular_file,
     submit_feature_type_profiling_job,
 )
 from VAEQL_plus.util.AWS_Batch_interface import SSE_CUSTOMER_KEY_ENV_VAR, AWS_Batch_Interface
@@ -39,7 +38,7 @@ def test_summarize_csv_without_raw_value_examples(tmp_path) -> None:
     source = tmp_path / "trial.csv"
     source.write_text("age,ecog\n61,1\n62,2\n", encoding="utf-8")
 
-    summary = summarize_tabular_file(source)
+    summary = FeatureTypeProfilingBySLM.summarize_tabular_file(source)
 
     assert summary["sampled_rows"] == 2
     assert summary["features"][0]["source_feature"] == "age"
@@ -61,11 +60,11 @@ def test_parse_profile_response_requires_all_source_features() -> None:
     )
 
     with pytest.raises(ValueError, match="omitted source features"):
-        parse_profile_response(response, ["age", "ecog"])
+        FeatureTypeProfiler.parse_profile_response(response, ["age", "ecog"])
 
 
 def test_profile_manifest_requires_human_review() -> None:
-    manifest = build_profile_manifest(
+    manifest = FeatureTypeProfilingBySLM.build_profile_manifest(
         source_s3_uri="s3://pds/raw/trial.csv",
         model_name=DEFAULT_MODEL_NAME,
         schema_summary={"features": []},
@@ -148,7 +147,7 @@ def test_step0_reads_a_mountpoint_path_and_writes_a_local_manifest_copy(tmp_path
             ]
 
     monkeypatch.setattr(module, "AWS_S3_Interface", FakeS3)
-    monkeypatch.setattr(module, "MinistralFeatureTypeProfiler", FakeProfiler)
+    monkeypatch.setattr(module, "FeatureTypeProfiler", FakeProfiler)
     monkeypatch.setenv(SSE_CUSTOMER_KEY_ENV_VAR, base64.b64encode(bytes(range(32))).decode("ascii"))
 
     output_uri = run_feature_type_profiling(
