@@ -22,25 +22,27 @@ Date: 2026-04-01
 """
 
 import fcntl
-import os
-import math
-import re
 import io
+import math
+import os
+import re
+from multiprocessing import Pool, cpu_count
+from typing import Dict, List, NamedTuple, Set, Tuple
+
+import lightning.pytorch as torch_lit
 import numpy as np
 import pandas as pd
-from typing import Set, Dict, Tuple, List, NamedTuple
-from multiprocessing import Pool, cpu_count
-from typing_extensions import override
-
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-import lightning.pytorch as torch_lit
+from typing_extensions import override
 
 from VAEQL_plus.conf.config import DisentangledBetaVaeTuningConfig
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
+
 from .torch_nn import BetaGausMixedDVAE
-from .utils import BetaGausMixedDVAEUtils, ArrayLike
+from .utils import ArrayLike, BetaGausMixedDVAEUtils
+
 
 class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     """
@@ -66,7 +68,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     # - "multi_mae": MAE of the mean prediction over multiple imputations.
     # - "multi_rmse": RMSE of the mean prediction over multiple imputations.
     # - "prop_*q": empirical quantile-interval coverage from multiple imputations.
-    CAND_METRIC_KEYS: Set[str] = {
+    CAND_METRIC_KEYS: Set[str] = {  # noqa: RUF012
         "mae",
         "rmse",
         "multi_mae",
@@ -76,7 +78,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         "prop_95q",
         "prop_99q",
     }
-    DEFAULT_CAND_METRIC_WEIGHTS: Dict[str, float] = {
+    DEFAULT_CAND_METRIC_WEIGHTS: Dict[str, float] = {  # noqa: RUF012
         "mae": 0.15,
         "rmse": 0.15,
         "multi_mae": 0.25,
@@ -261,6 +263,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 "C": capacity_C,
                 "epoch": epoch,
                 "selection_metric_name": results.get("selection_metric_name", "weighted_composite_metric"),
+                "weighted_composite_score": results.get("weighted_composite_score", None),
                 "fold_idx": results.get("fold_idx", None),
                 "mae": results.get("mae", None),
                 "rmse": results.get("rmse", None),
@@ -317,7 +320,8 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             try:
                 if not os.path.exists(results_path):
                     with open(results_path, "w", encoding="utf-8") as fh:
-                        fh.write('beta,C,epoch,selection_metric_name,mae,rmse,multi_mae,multi_rmse,'
+                        fh.write('beta,C,epoch,selection_metric_name,weighted_composite_score,'
+                                 'mae,rmse,multi_mae,multi_rmse,'
                                  'kl_disc,kl_cont,'
                                  'prop_80q,prop_90q,prop_95q,prop_99q,fold_idx\n')
 
@@ -570,13 +574,16 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         # a batch size of 128 should be reasonable for stable training without out of memory (OOM) on a single GPU; 
         # this can be tuned if needed
         batch_size: int = 128,
-        use_check_point: bool = False 
+        use_check_point: bool = False,
+        starting_epoch: int = 0,  # epoch offset for continuing Gumbel-temperature annealing
     ) -> "BetaGausMixedDVAETrainer.TrainOneFoldOutput":
         """
         Train VAE for `epochs` on the given fold's training data with Lightning.
         Returns the latest mini-batch loss tuple:
         (last_loss, last_recon, last_kl, last_kl_disc, last_kl_cont).
         """
+        if int(starting_epoch) < 0:
+            raise ValueError(f"starting_epoch must be nonnegative, got {starting_epoch!r}.")
         idxed_train_t = TensorDataset(train_tensor)
         loader = DataLoader(idxed_train_t, batch_size=batch_size, shuffle=True, drop_last=False)
         lightning_mod = BetaGausMixedDVAETrainer(
@@ -588,6 +595,10 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             use_adam=bool(use_adam),
             optimizer=optimizer,
         )
+        # train_one_fold can be called in successive evaluation chunks. Resume
+        # the model's annealing schedule at the fold's absolute epoch instead
+        # of restarting it at epoch zero for each chunk.
+        lightning_mod.tau_epoch_idx = int(starting_epoch) - 1
         lightning_mod.to(device)
         accelerator = "gpu" if device.type == "cuda" else "cpu"
         trainer = torch_lit.Trainer(
@@ -702,6 +713,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             results_eval["kl_disc"] = train_output.last_kl_disc
             results_eval["kl_cont"] = train_output.last_kl_cont
             metric_value = BetaGausMixedDVAETrainer._composite_metric_score(results_eval, metric_weights)
+            results_eval["weighted_composite_score"] = metric_value
     
             BetaGausMixedDVAETrainer.save_results(
                 results_eval,
@@ -908,7 +920,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         start_epoch, max_epoch, epochs_between_evals = (int(v) for v in config["halving_epoch_budgets"])
         min_epochs = start_epoch if min_epochs is None else int(min_epochs)
         fold_scores: Dict[str, Tuple[float]] = {}
-        results_path = config["results_path"]
+        results_path = config.get("results_path", "beta_analysis.csv")
         
         for fold_idx in range(k_folds):
             split_output = BetaGausMixedDVAETrainer.split_training_and_validation(

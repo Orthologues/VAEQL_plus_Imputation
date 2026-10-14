@@ -1,47 +1,173 @@
 \begin{algorithm}[ht]
-\footnotesize % Reduces size to fit more content
-\captionof{algorithm}{\textbf{Grid-Halving $\beta$–$C$ Search with $K$-Fold Evaluation}}
+\footnotesize
+\captionof{algorithm}{\textbf{Grid-Halving $\beta$--$C$ Search with $K_{\mathrm{CV}}$-Fold Evaluation}}
 \label{algo:betaC_Grid_halving}
-\begin{algorithmic}[1] % Using [1] for line numbering every line is usually clearer
+\begin{algorithmic}[1]
+\setlength{\itemsep}{0.3em}
 
-  \Require{ \\
-    \begin{minipage}[t]{0.95\linewidth}
-      \textbf{Input/config:} \\
-      $\boldsymbol{D}$ \Comment{clinical-trial-based tabular input dataset} \\
-      $\beta_{\min}, \beta_{\max}, C_{\min}, C_{\max}$ \Comment{permissible range of fine-tuning for $\beta, C$} \\
-      $\alpha_0$ \Comment{maximum relative grid width $\sigma_{\max}$ for $\beta$ and $C$ (default $\alpha_0 \coloneqq 0.01$)} \\
-      $K$ folds, batch size $B$, learning rate $\eta$, grid-halving cycles $N$, sample-size of multi-imputations $M$ \\
-      Budget: $\epsilon_{\text{chunk}}, \epsilon_{\max}$; Tolerance $\tau$, patience $p$, metric $\mathfrak{m}$
-    \end{minipage}
-  }
-  \Statex
+\Require Aligned preprocessed matrices
+         $\mathcal D=(X_{\mathrm{ref}},X_{\mathrm{in}})$,
+         ordered feature specifications $\Phi$,
+         and source missingness mask $\mathbf M$ from
+         \cref{algo:data_preprocessing}
+\Require Search bounds $\beta_{\min},\beta_{\max},C_{\min},C_{\max}$
+\Require Maximum relative grid width $\alpha_0$ (default $0.01$)
+\Require GMM component count $K$ and latent dimension $Z$
+\Require $K_{\mathrm{CV}}$ folds, $N$ imputation draws, batch size $B$,
+         $R$ imputation-update cycles, learning rate $\eta$,
+         and training settings
+         $(E_0,E_{\max},E_{\mathrm{step}},E_{\min},\tau,p)$
+\Require Default composite weights $\mathbf w=(0.15,0.15,0.25,0.25,0.05,0.05,0.10)$
+         for type-3 MAE, RMSE, multiple-imputation MAE/RMSE, and 80\%, 90\%,
+         95\% coverage deviations, respectively
+\Ensure Best candidate $q^\star=(\beta^\star,C^\star)$ and its
+         fold-averaged score $s^\star$
 
-  \Procedure{\textit{GridHalvingSearch}}{$\text{config}$}
-    \State $(X_0, M_0, \{\Phi\}) \gets \textsc{PreprocessAndScaleData}(\mathcal{D})$ \\
-    \Comment{feature-type-specific encoding or scaling, returning to a pre-processed, scaled and pre-imputed dataset $X_0$, a missingness mask and $M_0$ a set of processed features $\{\Phi\}$ of $\mathcal{D}$, available at \texttt{VAEQL\_plus.util.feat\_preprocessor}}
-    \State $(\beta_0, C_0) \gets (\beta_{\max}-\beta_{\min},\, C_{\max}-C_{\min})$; \quad $q^\star \gets \varnothing$
-    \While{$(\Delta\beta > \alpha \beta_0) \lor (\Delta C > \alpha C_0)$}
-      \State $\beta_m \gets \text{mid}(\beta); \quad C_m \gets \text{mid}(C)$
-      \State $\mathcal{Q} \gets \text{Corner points of current grid}$ 
-      \State $\mathcal{R} \gets$ \textsc{RunCandidateCVsInParallel}$(\mathcal{Q}, X_{\mathrm{full}}, X_{\mathrm{miss}}, \mathcal{S}, \text{config})$
-      \State $r^\star \gets \arg\min_{r \in \mathcal{R}} r.\text{score}$; \quad $q^\star \gets r^\star.q$
-      \State \textbf{Update grid towards winning sub-grid}:
-      \State \textbf{if} $q^\star=(\beta_{\min},C_{\min})$ \textbf{then} $(\beta_{\max},C_{\max}) \gets (\beta_m,C_m)$
-      \State \textbf{else if} ... \Comment{Shortened logic to save horizontal space}
-    \EndWhile
-    \State \textsc{TrainVAEQLwithBestParams}$(q^\star.\beta, q^\star.C, \dots)$
-  \EndProcedure
+\State $\mathcal P_{\mathrm{GMM}}\gets
+       \textsc{DefineGMMPrior}(K,Z)$
+       \Comment{each fold-specific VAE learns its own prior parameters}
 
-  \Statex
-  \Procedure{\textit{RunCandidateCV}}{$\beta, C, \text{config}$}
-    \For{$k = 0$ \textbf{to} $K-1$}
-      \State $(X_{\text{tr}}, X_{\text{vl}}^{\text{ms}}, X_{\text{vl}}^{\text{fl}}, \text{idx}) \gets \textsc{Split}(k)$ \Comment{Abbreviated variable names}
-      \State Train in chunks until $\epsilon_{\max}$ or early-stop via $\mathfrak{m}$ with $\tau, p$
-      \State $m \gets \textsc{EvaluateModel}(VAE, X_{\text{val}}, \dots, \mathcal{S}, R, M)$
-      \State \textsc{SaveResults}$(m, \beta, C)$
+\Statex
+\Procedure{GridHalvingBetaCSearch}
+          {$\mathcal D,\Phi,\mathbf M,\mathcal P_{\mathrm{GMM}},\textsc{config}$}
+  \State $(\beta_{\mathrm{lo}}^{(0)},\beta_{\mathrm{hi}}^{(0)})
+         \gets(\beta_{\min},\beta_{\max})$
+  \State $(C_{\mathrm{lo}}^{(0)},C_{\mathrm{hi}}^{(0)})
+         \gets(C_{\min},C_{\max})$
+  \State $\Delta\beta_0\gets\beta_{\max}-\beta_{\min};\quad
+         \Delta C_0\gets C_{\max}-C_{\min}$
+  \State $q^\star\gets\bot;\quad s^\star\gets+\infty;\quad t\gets0$
+
+  \While{$\max\!\left\{
+       \dfrac{\beta_{\mathrm{hi}}^{(t)}-\beta_{\mathrm{lo}}^{(t)}}{\Delta\beta_0},
+       \dfrac{C_{\mathrm{hi}}^{(t)}-C_{\mathrm{lo}}^{(t)}}{\Delta C_0}
+       \right\}>\alpha_0$}
+    \State $\beta_{\mathrm{mid}}^{(t)}\gets
+           \beta_{\mathrm{lo}}^{(t)}+
+           \dfrac{\beta_{\mathrm{hi}}^{(t)}-\beta_{\mathrm{lo}}^{(t)}}{2}$
+    \State $C_{\mathrm{mid}}^{(t)}\gets
+           C_{\mathrm{lo}}^{(t)}+
+           \dfrac{C_{\mathrm{hi}}^{(t)}-C_{\mathrm{lo}}^{(t)}}{2}$
+    \State $\mathcal Q_t\gets\{
+           (\beta_{\mathrm{lo}}^{(t)},C_{\mathrm{lo}}^{(t)}),
+           (\beta_{\mathrm{lo}}^{(t)},C_{\mathrm{hi}}^{(t)}),
+           (\beta_{\mathrm{hi}}^{(t)},C_{\mathrm{lo}}^{(t)}),
+           (\beta_{\mathrm{hi}}^{(t)},C_{\mathrm{hi}}^{(t)})\}$
+    \State $\mathcal R_t\gets
+           \textsc{EvaluateCandidatesByKFoldCV}
+           (\mathcal Q_t,\mathcal D,\Phi,\mathbf M,
+            \mathcal P_{\mathrm{GMM}},N,\textsc{config})$
+           \Comment{evaluation procedure in \cref{algo:betaC_candidate_cv}}
+    \State $r_t\gets\arg\min_{r\in\mathcal R_t}r.\text{score}$
+    \State $(q_t,s_t)\gets(r_t.q,r_t.\text{score})$
+    \If{$s_t<s^\star$}
+      \State $(q^\star,s^\star)\gets(q_t,s_t)$
+    \EndIf
+
+    \State Write $q_t=(\beta_t,C_t)$ and shrink both intervals toward its corner:
+    \State $(\beta_{\mathrm{lo}}^{(t+1)},\beta_{\mathrm{hi}}^{(t+1)})\gets
+           \begin{cases}
+             (\beta_{\mathrm{lo}}^{(t)},\beta_{\mathrm{mid}}^{(t)}),
+               & \beta_t=\beta_{\mathrm{lo}}^{(t)},\\
+             (\beta_{\mathrm{mid}}^{(t)},\beta_{\mathrm{hi}}^{(t)}),
+               & \beta_t=\beta_{\mathrm{hi}}^{(t)}
+           \end{cases}$
+    \State $(C_{\mathrm{lo}}^{(t+1)},C_{\mathrm{hi}}^{(t+1)})\gets
+           \begin{cases}
+             (C_{\mathrm{lo}}^{(t)},C_{\mathrm{mid}}^{(t)}),
+               & C_t=C_{\mathrm{lo}}^{(t)},\\
+             (C_{\mathrm{mid}}^{(t)},C_{\mathrm{hi}}^{(t)}),
+               & C_t=C_{\mathrm{hi}}^{(t)}
+           \end{cases}$
+    \State $t\gets t+1$
+  \EndWhile
+  \State \Return $(q^\star,s^\star)$
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[ht]
+\footnotesize
+\captionof{algorithm}{\textbf{$K_{\mathrm{CV}}$-Fold Evaluation of a $\beta$--$C$ Candidate}}
+\label{algo:betaC_candidate_cv}
+\begin{algorithmic}[1]
+\setlength{\itemsep}{0.3em}
+
+\Require Candidate set $\mathcal Q$, aligned data $\mathcal D=(X_{\mathrm{ref}},X_{\mathrm{in}})$,
+         feature specifications $\Phi$, source mask $\mathbf M$,
+         GMM prior specification $\mathcal P_{\mathrm{GMM}}$,
+         and $N$ imputation draws
+\Ensure Fold-averaged score for each candidate $q\in\mathcal Q$
+
+\Procedure{EvaluateCandidatesByKFoldCV}
+          {$\mathcal Q,\mathcal D,\Phi,\mathbf M,
+            \mathcal P_{\mathrm{GMM}},N,\textsc{config}$}
+  \For{each candidate $q=(\beta,C)\in\mathcal Q$}
+    \For{$k=1,\ldots,K_{\mathrm{CV}}$}
+      \State Split row indices into disjoint training and validation sets
+             $I_k^{\mathrm{tr}}$ and $I_k^{\mathrm{val}}$
+      \State $X_{\mathrm{tr}}\gets X_{\mathrm{in}}[I_k^{\mathrm{tr}},:]$
+      \State $X_{\mathrm{val}}^{\mathrm{base}}\gets
+             X_{\mathrm{in}}[I_k^{\mathrm{val}},:];\quad
+             \mathbf M_k\gets\mathbf M[I_k^{\mathrm{val}},:]$
+             \Comment{$\mathbf M_k$: 0 observed, 1 source-missing, 2 previously amputed}
+      \State $(X_{\mathrm{val}},\mathbf M_k^{\mathrm{val}},
+             \mathbf M_k^{\mathrm{imp}})\gets
+             \textsc{MakeValidationView}
+             (X_{\mathrm{val}}^{\mathrm{base}},\mathbf M_k,\Phi)$
+             \Comment{ordinal/categorical groups; other columns singleton; 10\% per unit}
+      \State In $\mathbf M_k^{\mathrm{val}}$, selected type-0 cells are labeled 3
+             and selected type-1/2 cells are labeled 4; initialize
+             $\mathbf M_k^{\mathrm{imp}}$ from $\mathbf M_k$
+             \Comment{type 0$\to$3; type 1/2$\to$4; type 4 excluded from scoring}
+      \State For each row with no type-3 cell, restore its validation mask from
+             $\mathbf M_k$
+             \Comment{discard only that row's draw; retain other rows' draws}
+      \State Set $X_{\mathrm{val},ij}\gets0$ and
+             $\mathbf M_{k,ij}^{\mathrm{imp}}\gets2$
+             for cells with $\mathbf M_{k,ij}^{\mathrm{val}}=3$
+             \Comment{hide type-3 values; 3$\to$2 for imputation}
+      \State Initialize a fresh fold-specific VAE on $X_{\mathrm{tr}}$ using
+             $\Phi$, $\mathcal P_{\mathrm{GMM}}$, and $(\beta,C)$
+      \State $s_{q,k}^{\star}\gets+\infty;\quad e\gets0;\quad h\gets0$
+      \While{$e<E_{\max}$}
+        \State Train the VAE for $E_0$ epochs if $e=0$, otherwise for
+               $\min(E_{\mathrm{step}},E_{\max}-e)$ epochs; update $e$
+        \For{$n=1,\ldots,N$}
+          \State $\widehat X_{\mathrm{val}}^{(n)}\gets
+                 \textsc{Impute}(X_{\mathrm{val}},
+                 \mathbf M_k^{\mathrm{imp}},\Phi;R)$
+        \EndFor
+        \State $\widehat X_{\mathrm{val}}^{\mathrm{single}}\gets
+               \textsc{ImputeSingle}(X_{\mathrm{val}},
+               \mathbf M_k^{\mathrm{imp}},\Phi;10)$
+        \State $\bar X_{\mathrm{val}}\gets
+               \dfrac{1}{N}\sum_{n=1}^{N}\widehat X_{\mathrm{val}}^{(n)}$
+        \State Compute type-3 $\mathrm{MAE}$ and $\mathrm{RMSE}$ from
+               $\widehat X_{\mathrm{val}}^{\mathrm{single}}$, and type-3
+               multiple-imputation $\mathrm{MAE}$, $\mathrm{RMSE}$, and
+               empirical coverage deviations from
+               $\{\widehat X_{\mathrm{val}}^{(n)}\}_{n=1}^N$
+               \Comment{exclude type-4 cells}
+        \State $s_{q,k}\gets\sum_j w_j v_{q,k,j}$
+               \Comment{$\mathbf v_{q,k}$ contains the seven type-3 metrics above}
+        \If{$s_{q,k}<s_{q,k}^{\star}-\tau$}
+          \State $s_{q,k}^{\star}\gets s_{q,k};\quad h\gets0$
+        \Else
+          \State $h\gets h+1$
+        \EndIf
+        \If{$e\ge E_{\min}$ and $h\ge p$}
+          \State \textbf{break}
+        \EndIf
+      \EndWhile
+      \State \textsc{SaveFoldResult}$(q,k,s_{q,k}^{\star})$
     \EndFor
-    \State \Return mean fold metric as candidate score
-  \EndProcedure
-  
+    \State $\operatorname{score}(q)\gets
+           \dfrac{1}{K_{\mathrm{CV}}}
+           \sum_{k=1}^{K_{\mathrm{CV}}}s_{q,k}^{\star}$
+  \EndFor
+  \State \Return candidate scores
+\EndProcedure
+
 \end{algorithmic}
 \end{algorithm}

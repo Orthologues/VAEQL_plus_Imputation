@@ -266,8 +266,8 @@ class BetaGausMixedDVAEUtils:
         ]
         selected_cols = selected_grouped_cols + selected_single_cols
         if not selected_cols:
-            return np.array([], dtype=np.int8)
-        return np.array(selected_cols, dtype=np.int8)
+            return np.array([], dtype=np.int64)
+        return np.array(selected_cols, dtype=np.int64)
 
     @staticmethod
     def generate_validation_amputation(
@@ -341,8 +341,10 @@ class BetaGausMixedDVAEUtils:
                 f"check `prop_miss_col={prop_miss_col}` and feature amputation units."
             )
 
-        null_rows = np.array(null_rows_list, dtype=np.int8)
-        null_cols = np.array(null_cols_list, dtype=np.int8)
+        # These are array indices, not mask values. int8 overflows for ordinary
+        # cohort sizes and feature widths above 127.
+        null_rows = np.array(null_rows_list, dtype=np.int64)
+        null_cols = np.array(null_cols_list, dtype=np.int64)
         pre_validation_vals = validation_mask[null_rows, null_cols]
         # Type-4 cells are explicitly excluded from validation metrics because
         # they were already non-observed before $\beta$-C validation.

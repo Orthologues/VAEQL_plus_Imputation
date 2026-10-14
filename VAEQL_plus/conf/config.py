@@ -64,7 +64,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     epoch_chunk: int | None
     max_epochs: int | None
     halving_epoch_budgets: Tuple[int, ...]
-    halving_metric: str
     convergence_tolerance: float
     convergence_patience: int
     min_epochs_before_convergence: int
@@ -73,13 +72,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     k_folds: int
     recycles: int
     m: int
-
-    # I/O paths and misc
-    results_path: str
-    data_path: str
-    corrupt_data_path: str
-    initial_imputation_strategy: str
-    model_outdir: str
 
     @classmethod
     def default_cv_beta_C_tuning_config_path(cls) -> Path:
@@ -108,13 +100,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         use_adam_optimizer: bool = bool(CV_BETA_C_TUNING_PARAMS["use_adam_optimizer"]),
         k_folds: int = int(CV_BETA_C_TUNING_PARAMS["k_folds"]),
         recycles: int = int(CV_BETA_C_TUNING_PARAMS["recycles"]),
-        results_path: str = str(CV_BETA_C_TUNING_PARAMS["results_path"]),
-        data_path: str = str(CV_BETA_C_TUNING_PARAMS["data_path"]),
-        corrupt_data_path: str = str(CV_BETA_C_TUNING_PARAMS["corrupt_data_path"]),
-        initial_imputation_strategy: str = str(CV_BETA_C_TUNING_PARAMS["initial_imputation_strategy"]),
-        model_outdir: str = str(CV_BETA_C_TUNING_PARAMS["model_outdir"]),
         halving_epoch_budgets: Tuple[int, ...] | list[int] | None = tuple(CV_BETA_C_TUNING_PARAMS["halving_epoch_budgets"]),
-        halving_metric: str = str(CV_BETA_C_TUNING_PARAMS["halving_metric"]),
         convergence_tolerance: float = float(CV_BETA_C_TUNING_PARAMS["convergence_tolerance"]),
         convergence_patience: int = int(CV_BETA_C_TUNING_PARAMS["convergence_patience"]),
         min_epochs_before_convergence: int = int(CV_BETA_C_TUNING_PARAMS["min_epochs_before_convergence"]),
@@ -203,18 +189,12 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             epoch_chunk=epoch_chunk,
             max_epochs=max_epochs,
             halving_epoch_budgets=budgets,
-            halving_metric=halving_metric,
             convergence_tolerance=convergence_tolerance,
             convergence_patience=convergence_patience,
             min_epochs_before_convergence=min_epochs_before_convergence,
             k_folds=k_folds,
             recycles=recycles,
             m=m,
-            results_path=results_path,
-            data_path=data_path,
-            corrupt_data_path=corrupt_data_path,
-            initial_imputation_strategy=initial_imputation_strategy,
-            model_outdir=model_outdir,
         )
 
         return cfg
