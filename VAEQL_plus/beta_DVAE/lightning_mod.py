@@ -62,15 +62,12 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     # `imputation_mask`: original 0/1/2 mask for $\beta$-DVAE imputation semantics; unchanged by $\beta$-C validation amputation
     ####################################################################################################
     
-    # Candidate metric semantics:
-    # - "mae": final loss from one `impute_single` refresh trajectory.
-    # - "rmse": final RMSE from one `impute_single` refresh trajectory.
+    # Candidate-ranking metrics use multiple-imputation summaries and coverage.
+    # Single-imputation `mae`/`rmse` remain diagnostic outputs only.
     # - "multi_mae": MAE of the mean prediction over multiple imputations.
     # - "multi_rmse": RMSE of the mean prediction over multiple imputations.
     # - "prop_*q": empirical quantile-interval coverage from multiple imputations.
     CAND_METRIC_KEYS: Set[str] = {  # noqa: RUF012
-        "mae",
-        "rmse",
         "multi_mae",
         "multi_rmse",
         "prop_80q",
@@ -79,13 +76,11 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         "prop_99q",
     }
     DEFAULT_CAND_METRIC_WEIGHTS: Dict[str, float] = {  # noqa: RUF012
-        "mae": 0.15,
-        "rmse": 0.15,
-        "multi_mae": 0.25,
-        "multi_rmse": 0.25,
-        "prop_90q": 0.05,
-        "prop_95q": 0.10,
-        "prop_80q": 0.05,
+        "multi_mae": 5 / 14,
+        "multi_rmse": 5 / 14,
+        "prop_80q": 1 / 14,
+        "prop_90q": 1 / 14,
+        "prop_95q": 2 / 14,
         "prop_99q": 0.0,
     }
     
@@ -349,16 +344,15 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         """
         Evaluate imputation quality on the validation fold.
 
-        This method computes:
-        - single-imputation endpoint metrics: `mae`, `rmse`
+        This method returns diagnostic single-imputation endpoint metrics
+        (`mae`, `rmse`), which are excluded from candidate ranking, plus:
         - multiple-imputation aggregate metrics: `multi_mae`, `multi_rmse`
         - quantile-coverage metrics on validation-mask type-3 cells:
           `prop_80q`, `prop_90q`, `prop_95q`, `prop_99q`
 
         `num_imputations` controls how many stochastic imputation samples are drawn.
         `single_impute_max_iter` controls the iterative-refresh budget within each
-        `impute_multiple` call (a single imputation) and is intentionally independent from
-        `num_imputations`.
+        `impute_multiple` call and is intentionally independent from `num_imputations`.
 
         `validation_input` must be pre-imputed (no NaN values).
         `validation_ref` is the reference matrix used for metric computation.
@@ -904,7 +898,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         use_adam = config.get("use_adam_optimizer", True)
         batch_size = config["batch_size"]
         lr = config["learning_rate"]
-        num_imputations = config["m"]
+        num_imputations = int(config.get("num_imputations", config.get("m", 10)))
         latent_dim = config["vae_cont_lat_dim"]
         n_gmm_components = int(config["n_gmm_components"])
         hidden_dim1 = config["hidden_size_1"]

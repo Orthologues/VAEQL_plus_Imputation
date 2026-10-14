@@ -71,7 +71,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     # CV + evaluation
     k_folds: int
     recycles: int
-    m: int
+    num_imputations: int
 
     @classmethod
     def default_cv_beta_C_tuning_config_path(cls) -> Path:
@@ -91,7 +91,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         vae_hidden_size_1: int = int(DIS_BETAVAE_TRAIN_VAL_PARAMS["hidden_size_1"]),
         vae_hidden_size_2: int = int(DIS_BETAVAE_TRAIN_VAL_PARAMS["hidden_size_2"]),
         num_feat_loss_metric: str = str(DIS_BETAVAE_TRAIN_VAL_PARAMS["num_feat_loss_metric"]),
-        m: int = int(CV_BETA_C_TUNING_PARAMS["m"]),
+        num_imputations: int = int(CV_BETA_C_TUNING_PARAMS["num_imputations"]),
         beta_range: Tuple[float, float] = tuple(CV_BETA_C_TUNING_PARAMS["beta_range"]),
         C_range: Tuple[float, float] = tuple(CV_BETA_C_TUNING_PARAMS["C_range"]),
         granularity: float = float(CV_BETA_C_TUNING_PARAMS["granularity"]),
@@ -143,10 +143,10 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             )
         if k_folds <= 0:
             raise ValueError("k_folds must be > 0.")
-        if recycles <= 0:
-            raise ValueError("recycles must be > 0.")
-        if m <= 0:
-            raise ValueError("m must be > 0.")
+        if not 5 <= recycles <= 20:
+            raise ValueError("recycles must be between 5 and 20.")
+        if not 5 <= num_imputations <= 20:
+            raise ValueError("num_imputations must be between 5 and 20.")
         if vae_hidden_size_1 <= 0 or vae_hidden_size_2 <= 0:
             raise ValueError("hidden sizes must be > 0.")
         if n_gmm_components <= 0 or vae_cont_lat_dim <= 0:
@@ -194,7 +194,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             min_epochs_before_convergence=min_epochs_before_convergence,
             k_folds=k_folds,
             recycles=recycles,
-            m=m,
+            num_imputations=num_imputations,
         )
 
         return cfg

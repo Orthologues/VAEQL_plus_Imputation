@@ -13,13 +13,14 @@
 \Require Search bounds $\beta_{\min},\beta_{\max},C_{\min},C_{\max}$
 \Require Maximum relative grid width $\alpha_0$ (default $0.01$)
 \Require GMM component count $K$ and latent dimension $Z$
-\Require $K_{\mathrm{CV}}$ folds, $N$ imputation draws, batch size $B$,
-         $R$ imputation-update cycles, learning rate $\eta$,
+\Require $K_{\mathrm{CV}}$ folds, $5\leq N\leq20$ imputation draws
+         (default $N=10$), batch size $B$, and $5\leq R\leq20$
+         imputation-update cycles (default $R=10$), learning rate $\eta$,
          and training settings
          $(E_0,E_{\max},E_{\mathrm{step}},E_{\min},\tau,p)$
-\Require Default composite weights $\mathbf w=(0.15,0.15,0.25,0.25,0.05,0.05,0.10)$
-         for type-3 MAE, RMSE, multiple-imputation MAE/RMSE, and 80\%, 90\%,
-         95\% coverage deviations, respectively
+\Require Default composite weights $\mathbf w=(5/14,5/14,1/14,1/14,2/14)$
+         for multiple-imputation MAE/RMSE and 80\%, 90\%, 95\% coverage
+         deviations, respectively
 \Ensure Best candidate $q^\star=(\beta^\star,C^\star)$ and its
          fold-averaged score $s^\star$
 
@@ -138,19 +139,14 @@
                  \textsc{Impute}(X_{\mathrm{val}},
                  \mathbf M_k^{\mathrm{imp}},\Phi;R)$
         \EndFor
-        \State $\widehat X_{\mathrm{val}}^{\mathrm{single}}\gets
-               \textsc{ImputeSingle}(X_{\mathrm{val}},
-               \mathbf M_k^{\mathrm{imp}},\Phi;10)$
         \State $\bar X_{\mathrm{val}}\gets
                \dfrac{1}{N}\sum_{n=1}^{N}\widehat X_{\mathrm{val}}^{(n)}$
-        \State Compute type-3 $\mathrm{MAE}$ and $\mathrm{RMSE}$ from
-               $\widehat X_{\mathrm{val}}^{\mathrm{single}}$, and type-3
-               multiple-imputation $\mathrm{MAE}$, $\mathrm{RMSE}$, and
-               empirical coverage deviations from
+        \State Compute type-3 multiple-imputation $\mathrm{MAE}$, $\mathrm{RMSE}$,
+               and empirical coverage deviations from
                $\{\widehat X_{\mathrm{val}}^{(n)}\}_{n=1}^N$
                \Comment{exclude type-4 cells}
         \State $s_{q,k}\gets\sum_j w_j v_{q,k,j}$
-               \Comment{$\mathbf v_{q,k}$ contains the seven type-3 metrics above}
+               \Comment{$\mathbf v_{q,k}$ contains these five type-3 metrics}
         \If{$s_{q,k}<s_{q,k}^{\star}-\tau$}
           \State $s_{q,k}^{\star}\gets s_{q,k};\quad h\gets0$
         \Else

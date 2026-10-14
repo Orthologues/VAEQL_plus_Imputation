@@ -9,7 +9,7 @@
   "k_folds": 5,
   "learning_rate": 1e-3,
   "batch_size": 256,
-  "recycles": 6,
-  "m": 5,
+  "recycles": 10,
+  "num_imputations": 10,
   "min_epochs_before_convergence": 20
 }

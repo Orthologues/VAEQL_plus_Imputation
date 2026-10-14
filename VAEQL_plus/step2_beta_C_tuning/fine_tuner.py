@@ -146,14 +146,6 @@ def _calculate_score(
     metric_weights: Dict[str, float],
 ) -> tuple[float, Dict[str, float]]:
     """Compute the existing weighted composite score using only type-3 cells."""
-    if not 2 <= num_imputations <= 100:
-        raise ValueError(
-            f"Number of imputation draws must be between 2 and 100, got {num_imputations}."
-        )
-    if not 2 <= imputation_cycles <= 20:
-        raise ValueError(
-            f"Imputation cycles must be between 2 and 20, got {imputation_cycles}."
-        )
     score_cells = torch.as_tensor(view.validation_mask == 3, device=model.device)
     if not bool(score_cells.any().item()):
         raise ValueError("Cannot calculate a validation score without type-3 cells.")
@@ -163,17 +155,6 @@ def _calculate_score(
         view.imputation_mask, dtype=torch.int8, device=model.device
     )
     ref = torch.as_tensor(validation_ref, dtype=torch.float32, device=model.device)
-
-    # Match the existing evaluation protocol: one iterative single imputation
-    # and N stochastic multiple imputations, all compared against type-3 truth.
-    single_imputation = model.impute_single(
-        model_input,
-        n_cycles=10,
-        loss_option="BOTH",
-        X_mask=imputation_mask,
-        feat_type_dict=feat_type_dict,
-    )
-    single_errors = single_imputation.imputed_x[score_cells] - ref[score_cells]
 
     # Each call produces one VAE-based imputation; ``imputation_cycles`` sets
     # its internal reconstruction/update steps, not sklearn imputer iterations.
@@ -190,8 +171,6 @@ def _calculate_score(
     mean_imputation = multiple_imputations.mean(dim=0)
     multiple_errors = mean_imputation[score_cells] - ref[score_cells]
     metrics = {
-        "mae": float(torch.abs(single_errors).mean().item()),
-        "rmse": float(torch.sqrt(torch.square(single_errors).mean()).item()),
         "multi_mae": float(torch.abs(multiple_errors).mean().item()),
         "multi_rmse": float(torch.sqrt(torch.square(multiple_errors).mean()).item()),
     }
@@ -241,8 +220,16 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     device = torch.device(job.get("device", "cpu"))
     beta = float(job["beta"])
     capacity_C = float(job["C"])
-    num_imputations = int(config.get("num_imputations", config.get("N", config.get("m", 5))))
-    imputation_cycles = int(config.get("recycles", 5))
+    num_imputations = int(config.get("num_imputations", config.get("N", config.get("m", 10))))
+    imputation_cycles = int(config.get("recycles", 10))
+    if not 5 <= num_imputations <= 20:
+        raise ValueError(
+            f"Number of imputation draws must be between 5 and 20, got {num_imputations}."
+        )
+    if not 5 <= imputation_cycles <= 20:
+        raise ValueError(
+            f"Imputation cycles must be between 5 and 20, got {imputation_cycles}."
+        )
     selection_metric = "weighted_composite_metric"
     metric_weights = BetaGausMixedDVAETrainer._resolve_metric_weights(config)
     budgets = config.get("halving_epoch_budgets", (30, 300, 30))
@@ -676,8 +663,11 @@ def load_and_patch_cv_config(
             "set halving_metric to 'weighted_composite_metric'."
         )
     BetaGausMixedDVAETrainer._resolve_metric_weights(config)
-    if not 2 <= int(config["num_imputations"]) <= 100:
-        raise ValueError("N, the number of imputation draws, must be between 2 and 100.")
+    config["recycles"] = int(config["recycles"])
+    if not 5 <= int(config["num_imputations"]) <= 20:
+        raise ValueError("N, the number of imputation draws, must be between 5 and 20.")
+    if not 5 <= config["recycles"] <= 20:
+        raise ValueError("recycles, the number of imputation cycles, must be between 5 and 20.")
     if int(config["k_folds"]) < 2:
         raise ValueError("k_folds must be at least 2.")
     return config
