@@ -29,6 +29,27 @@ CV_BETA_C_TUNING_PARAMS_PATH = Path(__file__).with_name(
 with open(CV_BETA_C_TUNING_PARAMS_PATH, "r", encoding="utf-8") as _f:
     CV_BETA_C_TUNING_PARAMS: dict[str, Any] = json.load(_f)
 
+MIN_CONVERGENCE_TOLERANCE = 1e-4
+DEFAULT_CONVERGENCE_TOLERANCE = float(
+    CV_BETA_C_TUNING_PARAMS["convergence_tolerance"]
+)
+
+
+def validate_convergence_tolerance(value: Any) -> float:
+    """Return a finite score-improvement tolerance no smaller than 1e-4."""
+    try:
+        tolerance = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"convergence_tolerance must be finite and >= {MIN_CONVERGENCE_TOLERANCE:g}."
+        ) from exc
+    if not math.isfinite(tolerance) or tolerance < MIN_CONVERGENCE_TOLERANCE:
+        raise ValueError(
+            f"convergence_tolerance must be finite and >= {MIN_CONVERGENCE_TOLERANCE:g}; "
+            f"got {value!r}."
+        )
+    return tolerance
+
 
 def _resolve_device():
     """Resolve torch device lazily and fail-safe to CPU if torch is unavailable/broken."""
@@ -66,7 +87,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     halving_epoch_budgets: Tuple[int, ...]
     convergence_tolerance: float
     convergence_patience: int
-    min_epochs_before_convergence: int
     device: Any = _resolve_device()
     # CV + evaluation
     k_folds: int
@@ -103,7 +123,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
         halving_epoch_budgets: Tuple[int, ...] | list[int] | None = tuple(CV_BETA_C_TUNING_PARAMS["halving_epoch_budgets"]),
         convergence_tolerance: float = float(CV_BETA_C_TUNING_PARAMS["convergence_tolerance"]),
         convergence_patience: int = int(CV_BETA_C_TUNING_PARAMS["convergence_patience"]),
-        min_epochs_before_convergence: int = int(CV_BETA_C_TUNING_PARAMS["min_epochs_before_convergence"]),
         epoch_chunk: int | None = None,
         max_epochs: int | None = None,
     ) -> "DisentangledBetaVaeTuningConfig":
@@ -111,6 +130,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
 
         b_min, b_max = beta_range
         c_min, c_max = C_range
+        convergence_tolerance = validate_convergence_tolerance(convergence_tolerance)
 
         if b_min <= 0 or b_max <= 0:
             raise ValueError("beta_range entries must be > 0.")
@@ -141,8 +161,8 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
                 "num_feat_loss_metric must resolve to 'RMSE' or 'MAE', "
                 f"got {num_feat_loss_metric!r}."
             )
-        if k_folds <= 0:
-            raise ValueError("k_folds must be > 0.")
+        if k_folds not in {5, 10}:
+            raise ValueError("k_folds must be either 5 or 10.")
         if not 5 <= recycles <= 20:
             raise ValueError("recycles must be between 5 and 20.")
         if not 5 <= num_imputations <= 20:
@@ -191,7 +211,6 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
             halving_epoch_budgets=budgets,
             convergence_tolerance=convergence_tolerance,
             convergence_patience=convergence_patience,
-            min_epochs_before_convergence=min_epochs_before_convergence,
             k_folds=k_folds,
             recycles=recycles,
             num_imputations=num_imputations,

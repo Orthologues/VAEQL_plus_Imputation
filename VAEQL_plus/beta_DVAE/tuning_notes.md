@@ -7,7 +7,7 @@
 ## Updated Hyperparameter Search Flow
 - Entry point: `python -m VAEQL_plus.step2_beta_C_tuning.fine_tuner` runs a 4-corner halving search over $(\beta, C)$ ranges, parallelizing candidates across GPUs/CPUs. The default CV-config path is resolved through `VAEQL_plus.conf.config.DisentangledBetaVaeTuningConfig`.
 - Each halving iteration evaluates the four current corners via `run_candidate_cv` (full $K$-fold CV with early stopping) and shrinks the search box toward the winning corner until both spans are within `granularity * original_span`.
-- Epoch budgets come from `halving_epoch_budgets=[start_val, max_val, step_size]`: the first validation happens after `start_val` epochs, later validations advance by `step_size`, and training stops at `max_val`. Fallback remains `epoch_chunk`/`max_epochs` when budgets are absent. Convergence uses `convergence_tolerance`/`convergence_patience` with an optional `min_epochs_before_convergence`.
+- Epoch budgets come from `halving_epoch_budgets=[start_val, max_val, step_size]`: the first validation happens after `start_val` epochs, later validations advance by `step_size`, and training stops at `max_val`. Fallback remains `epoch_chunk`/`max_epochs` when budgets are absent. Convergence uses `convergence_tolerance` (finite and at least `1e-4`; default `1e-3`) and `convergence_patience`.
 - Metrics are logged to `beta_analysis.csv` for every fold/epoch chunk; the best $(\beta, C)$ is retrained once on fold 0 and checkpointed under `model_outdir`.
 
 ## Project Structure & Module Organization
@@ -21,7 +21,7 @@
 - Set up an isolated env: `python -m venv .venv && source .venv/bin/activate` followed by `python -m pip install torch pandas scikit-learn`.
 - Run the halving search: `python -m VAEQL_plus.step2_beta_C_tuning.fine_tuner`, or pass `--cv_config` explicitly when overriding the config resolved by `DisentangledBetaVaeTuningConfig`.
 - Monitor progress with `tail -f beta_analysis.csv`; inspect checkpoints in `trained_models/` after runs.
-- For quick debugging, clone the config, shrink `k_folds`, `halving_epoch_budgets`, or narrow `beta_range`/`C_range`, then point `--config` to the clone.
+- For quick debugging, clone the config, keep `k_folds` at 5, shorten `halving_epoch_budgets`, or narrow `beta_range`/`C_range`, then point `--config` to the clone.
 
 ## Coding Style & Naming Conventions
 - Stick to 4-space indents, type hints, and concise docstrings matching `evaluate_model` and `train_one_fold`.
@@ -43,4 +43,4 @@
 - Replace placeholder paths in the CV config resolved by `DisentangledBetaVaeTuningConfig` with secure locations; never commit raw datasets.
 - Version alternative configs with suffixes like `cv_params_local.json` instead of editing the shared default.
 - After crashes, delete stray `lock.txt` and prune old checkpoints once archived elsewhere.
-- Hyperparameter search uses 2D corner-halving: set `beta_range`, `C_range`, and `granularity` to control shrinkage. Candidate selection uses the weighted composite validation metric on type-3 cells; optional `halving_metric_weights` override the defaults in `BetaGausMixedDVAETrainer`. `halving_epoch_budgets=[start_val, max_val, step_size]` controls the initial evaluation point, hard epoch cap, and re-evaluation cadence; convergence is gated by tolerance/patience with a minimum-epoch guard.
+- Hyperparameter search uses 2D corner-halving: set `beta_range`, `C_range`, and `granularity` to control shrinkage. Candidate selection uses the weighted composite validation metric on type-3 cells; optional `halving_metric_weights` override the defaults in `BetaGausMixedDVAETrainer`. `halving_epoch_budgets=[start_val, max_val, step_size]` controls the initial evaluation point, hard epoch cap, and re-evaluation cadence; convergence is gated by tolerance and patience.

@@ -37,7 +37,11 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from typing_extensions import override
 
-from VAEQL_plus.conf.config import DisentangledBetaVaeTuningConfig
+from VAEQL_plus.conf.config import (
+    DEFAULT_CONVERGENCE_TOLERANCE,
+    DisentangledBetaVaeTuningConfig,
+    validate_convergence_tolerance,
+)
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 
 from .torch_nn import BetaGausMixedDVAE
@@ -494,8 +498,8 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 f"got {len(amputation_mask)!r} and {n_rows!r}."
             )
         k_folds = int(config["k_folds"])
-        if k_folds < 5 or k_folds > 10:
-            raise ValueError(f"`k_folds` must be >= 5 and <= 10, got {k_folds}")
+        if k_folds not in {5, 10}:
+            raise ValueError(f"`k_folds` must be either 5 or 10, got {k_folds}")
         if not (0 <= int(k_fold_idx) < k_folds):
             raise ValueError(f"`k_fold_idx` must satisfy 0 <= idx < {k_folds}, got {k_fold_idx}")
 
@@ -643,13 +647,15 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         results_path: str,
         metric_improvement_tolerance: float,
         max_non_improved_rounds: int,
-        min_epochs: int,
         lock_path: str = "lock.txt"
     ) -> "BetaGausMixedDVAETrainer.TrainFoldEvalOutput":
         """
         Train one fold with periodic evaluation and simple convergence check.
         Returns (best_metric_val, epochs_ran).
         """
+        metric_improvement_tolerance = validate_convergence_tolerance(
+            metric_improvement_tolerance
+        )
         best_metric_val = math.inf
         non_improved_rounds_count = 0
         completed_epochs = 0
@@ -724,7 +730,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             else:
                 non_improved_rounds_count += 1
 
-            if completed_epochs >= min_epochs and non_improved_rounds_count >= max_non_improved_rounds:
+            if non_improved_rounds_count >= max_non_improved_rounds:
                 break
 
         if selection_metric_name is None:
@@ -907,12 +913,12 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         device = torch.device(job_kwargs.get("device", "cpu"))
         k_folds = config["k_folds"]
         metric_weights = BetaGausMixedDVAETrainer._resolve_metric_weights(config)
-        metric_improvement_tolerance = config.get("convergence_tolerance", 1e-4)
+        metric_improvement_tolerance = validate_convergence_tolerance(
+            config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
+        )
         max_non_improved_rounds = config.get("convergence_patience", 10)
         num_feat_loss_metric = config.get("num_feat_loss_metric", "RMSE")
-        min_epochs = config.get("min_epochs_before_convergence", 50)
         start_epoch, max_epoch, epochs_between_evals = (int(v) for v in config["halving_epoch_budgets"])
-        min_epochs = start_epoch if min_epochs is None else int(min_epochs)
         fold_scores: Dict[str, Tuple[float]] = {}
         results_path = config.get("results_path", "beta_analysis.csv")
         
@@ -970,7 +976,6 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 results_path=results_path,
                 metric_improvement_tolerance=metric_improvement_tolerance,
                 max_non_improved_rounds=max_non_improved_rounds,
-                min_epochs=min_epochs
             )
             best_metric_val = fold_eval_output.best_metric_val
             selection_metric_name = fold_eval_output.selection_metric_name

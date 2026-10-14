@@ -24,7 +24,11 @@ if str(REPO_ROOT) not in sys.path:
 from VAEQL_plus.beta_DVAE.lightning_mod import BetaGausMixedDVAETrainer
 from VAEQL_plus.beta_DVAE.torch_nn import BetaGausMixedDVAE
 from VAEQL_plus.beta_DVAE.utils import BetaGausMixedDVAEUtils
-from VAEQL_plus.conf.config import DisentangledBetaVaeTuningConfig
+from VAEQL_plus.conf.config import (
+    DEFAULT_CONVERGENCE_TOLERANCE,
+    DisentangledBetaVaeTuningConfig,
+    validate_convergence_tolerance,
+)
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 from VAEQL_plus.step1_preprocessing.feat_preprocessor import (
     FeaturePreprocessor,
@@ -214,9 +218,11 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, feat_type_dict)
 
     n_folds = int(config["k_folds"])
-    if n_folds < 2 or n_folds > len(X_in):
-        raise ValueError(f"k_folds must be between 2 and the row count; got {n_folds} for {len(X_in)} rows.")
-    splits = KFold(n_splits=n_folds, shuffle=True, random_state=int(config.get("cv_random_seed", 1729)))
+    if n_folds not in {5, 10}:
+        raise ValueError(f"k_folds must be either 5 or 10; got {n_folds}.")
+    if n_folds > len(X_in):
+        raise ValueError(f"k_folds={n_folds} cannot exceed the row count ({len(X_in)}).")
+    splits = KFold(n_splits=n_folds, shuffle=True, random_state=int(config.get("cv_random_seed", 42)))
     device = torch.device(job.get("device", "cpu"))
     beta = float(job["beta"])
     capacity_C = float(job["C"])
@@ -238,13 +244,12 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     first_eval_epochs, max_epochs, eval_interval = (int(value) for value in budgets)
     if min(first_eval_epochs, max_epochs, eval_interval) <= 0 or first_eval_epochs > max_epochs:
         raise ValueError(f"Invalid halving_epoch_budgets: {budgets!r}.")
-    min_epochs = int(config.get("min_epochs_before_convergence", first_eval_epochs))
     patience = int(config.get("convergence_patience", 5))
-    tolerance = float(config.get("convergence_tolerance", 1e-4))
-    if min_epochs < 1 or patience < 1:
-        raise ValueError("min_epochs_before_convergence and convergence_patience must be positive.")
-    if not math.isfinite(tolerance) or tolerance < 0:
-        raise ValueError("convergence_tolerance must be finite and nonnegative.")
+    tolerance = validate_convergence_tolerance(
+        config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
+    )
+    if patience < 3:
+        raise ValueError("`convergence_patience` must be at least 3.")
     use_adam = bool(config.get("use_adam_optimizer", True))
     learning_rate = float(config["learning_rate"])
     batch_size = int(config["batch_size"])
@@ -253,7 +258,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     for fold_idx, (train_indices, val_indices) in enumerate(splits.split(X_in)):
         # Identical fold masks and initial weights across candidates make the
         # candidate comparison less sensitive to random variation.
-        seed = int(config.get("cv_random_seed", 1729)) + fold_idx
+        seed = int(config.get("cv_random_seed", 42)) + fold_idx
         np.random.seed(seed)
         torch.manual_seed(seed)
         if device.type == "cuda":
@@ -317,10 +322,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 rounds_without_improvement += 1
 
-            if (
-                completed_epochs >= min_epochs
-                and rounds_without_improvement >= patience
-            ):
+            if rounds_without_improvement >= patience:
                 break
 
         fold_scores.append(best_fold_score)
@@ -350,6 +352,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+## CHECKPOINT_HUMAN_REVIEW
 def _run_candidates_parallel(
     candidates: list[tuple[float, float]],
     config: Dict[str, Any],
@@ -664,12 +667,16 @@ def load_and_patch_cv_config(
         )
     BetaGausMixedDVAETrainer._resolve_metric_weights(config)
     config["recycles"] = int(config["recycles"])
+    config["convergence_tolerance"] = validate_convergence_tolerance(
+        config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
+    )
     if not 5 <= int(config["num_imputations"]) <= 20:
         raise ValueError("N, the number of imputation draws, must be between 5 and 20.")
     if not 5 <= config["recycles"] <= 20:
         raise ValueError("recycles, the number of imputation cycles, must be between 5 and 20.")
-    if int(config["k_folds"]) < 2:
-        raise ValueError("k_folds must be at least 2.")
+    config["k_folds"] = int(config["k_folds"])
+    if config["k_folds"] not in {5, 10}:
+        raise ValueError("k_folds must be either 5 or 10.")
     return config
 
 
@@ -694,7 +701,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Use pandas, PySpark, or RAM-scaled automatic selection",
     )
-    parser.add_argument("--k_folds", type=int, default=None)
+    parser.add_argument("--k_folds", type=int, choices=(5, 10), default=None)
     step_dir = REPO_ROOT / "VAEQL_plus" / "step2_beta_C_tuning"
     parser.add_argument("--results_path", type=Path, default=step_dir / "beta_C_halving.csv")
     parser.add_argument("--model_outdir", type=Path, default=step_dir / "trained_models")

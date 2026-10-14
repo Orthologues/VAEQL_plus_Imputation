@@ -13,11 +13,13 @@
 \Require Search bounds $\beta_{\min},\beta_{\max},C_{\min},C_{\max}$
 \Require Maximum relative grid width $\alpha_0$ (default $0.01$)
 \Require GMM component count $K$ and latent dimension $Z$
-\Require $K_{\mathrm{CV}}$ folds, $5\leq N\leq20$ imputation draws
+\Require $K_{\mathrm{CV}}\in\{5,10\}$ folds (default $K_{\mathrm{CV}}=5$),
+         $5\leq N\leq20$ imputation draws
          (default $N=10$), batch size $B$, and $5\leq R\leq20$
          imputation-update cycles (default $R=10$), learning rate $\eta$,
-         and training settings
-         $(E_0,E_{\max},E_{\mathrm{step}},E_{\min},\tau,p)$
+         epoch schedule $(E_0,E_{\max},E_{\mathrm{step}})=(30,300,30)$,
+         early-stopping tolerance $10^{-4}\leq\tau$ (default $\tau=10^{-3}$),
+         and patience $p=5$
 \Require Default composite weights $\mathbf w=(5/14,5/14,1/14,1/14,2/14)$
          for multiple-imputation MAE/RMSE and 80\%, 90\%, 95\% coverage
          deviations, respectively
@@ -152,7 +154,7 @@
         \Else
           \State $h\gets h+1$
         \EndIf
-        \If{$e\ge E_{\min}$ and $h\ge p$}
+        \If{$h\ge p$}
           \State \textbf{break}
         \EndIf
       \EndWhile
