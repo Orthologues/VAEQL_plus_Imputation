@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count, get_context
 from pathlib import Path
 from typing import Any, Dict, Literal, NamedTuple, Sequence, Tuple
 
@@ -25,9 +26,13 @@ from VAEQL_plus.beta_DVAE.lightning_mod import BetaGausMixedDVAETrainer
 from VAEQL_plus.beta_DVAE.torch_nn import BetaGausMixedDVAE
 from VAEQL_plus.beta_DVAE.utils import BetaGausMixedDVAEUtils
 from VAEQL_plus.conf.config import (
+    CV_BETA_C_TUNING_PARAMS,
     DEFAULT_CONVERGENCE_TOLERANCE,
     DisentangledBetaVaeTuningConfig,
-    validate_convergence_tolerance,
+    _validate_convergence_tolerance,
+    _validate_granularity,
+    _validate_k_folds,
+    _validate_search_ranges,
 )
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 from VAEQL_plus.step1_preprocessing.feat_preprocessor import (
@@ -52,9 +57,11 @@ def _numpy(value: Any) -> np.ndarray:
 
 
 def _available_devices() -> list[str]:
-    """Use multiple GPUs when available; otherwise run CPU workers."""
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        return [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+    """Use visible GPUs when available; otherwise run CPU workers."""
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        if device_count:
+            return [f"cuda:{i}" for i in range(device_count)]
     return ["cpu"]
 
 
@@ -62,7 +69,7 @@ def _validate_aligned_data(
     X_ref: np.ndarray,
     X_in: np.ndarray,
     source_mask: np.ndarray,
-    feature_specs: Sequence[OrderedFeature] | None,
+    feature_specs: Sequence[OrderedFeature],
     feat_type_dict: Dict[str, Any],
 ) -> None:
     if X_ref.ndim != 2 or X_in.ndim != 2 or source_mask.ndim != 2:
@@ -83,13 +90,14 @@ def _validate_aligned_data(
             "Feature schema does not match the matrix width: "
             f"{len(expected_names)} feature names versus {X_in.shape[1]} columns."
         )
-    if feature_specs is not None:
-        spec_names = [str(spec.name) for spec in feature_specs]
-        if spec_names != expected_names:
-            raise ValueError(
-                "Ordered feature specifications must follow the same sorted column order "
-                "as the matrices and feature schema."
-            )
+    if feature_specs is None:
+        raise ValueError("`ordered_feature_specs` is required to validate matrix columns.")
+    spec_names = [str(spec.name) for spec in feature_specs]
+    if spec_names != expected_names:
+        raise ValueError(
+            "Ordered feature specifications must follow the same sorted column order "
+            "as the matrices and feature schema."
+        )
 
 
 def _make_validation_view(
@@ -213,20 +221,16 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     X_ref = np.asarray(job["X_ref"], dtype=np.float32)
     X_in = np.asarray(job["X_in"], dtype=np.float32)
     source_mask = np.asarray(job["source_mask"], dtype=np.int8)
-    feature_specs = job.get("feature_specs")
+    feature_specs = job["feature_specs"]
     feat_type_dict = config["features_type_dict"]
     _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, feat_type_dict)
 
     n_folds = int(config["k_folds"])
-    if n_folds not in {5, 10}:
-        raise ValueError(f"k_folds must be either 5 or 10; got {n_folds}.")
-    if n_folds > len(X_in):
-        raise ValueError(f"k_folds={n_folds} cannot exceed the row count ({len(X_in)}).")
     splits = KFold(n_splits=n_folds, shuffle=True, random_state=int(config.get("cv_random_seed", 42)))
     device = torch.device(job.get("device", "cpu"))
     beta = float(job["beta"])
     capacity_C = float(job["C"])
-    num_imputations = int(config.get("num_imputations", config.get("N", config.get("m", 10))))
+    num_imputations = int(config["num_imputations"])
     imputation_cycles = int(config.get("recycles", 10))
     if not 5 <= num_imputations <= 20:
         raise ValueError(
@@ -245,7 +249,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     if min(first_eval_epochs, max_epochs, eval_interval) <= 0 or first_eval_epochs > max_epochs:
         raise ValueError(f"Invalid halving_epoch_budgets: {budgets!r}.")
     patience = int(config.get("convergence_patience", 5))
-    tolerance = validate_convergence_tolerance(
+    tolerance = _validate_convergence_tolerance(
         config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
     )
     if patience < 3:
@@ -352,14 +356,13 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-## CHECKPOINT_HUMAN_REVIEW
 def _run_candidates_parallel(
     candidates: list[tuple[float, float]],
     config: Dict[str, Any],
     X_ref: np.ndarray,
     X_in: np.ndarray,
     source_mask: np.ndarray,
-    feature_specs: Sequence[OrderedFeature] | None,
+    feature_specs: Sequence[OrderedFeature],
 ) -> list[dict[str, Any]]:
     devices = _available_devices()
     jobs = [
@@ -378,8 +381,15 @@ def _run_candidates_parallel(
     if len(jobs) == 1:
         return [_candidate_cv_worker(jobs[0])]
 
-    workers = min(len(jobs), cpu_count()) if devices == ["cpu"] else min(len(jobs), len(devices))
-    with Pool(processes=workers) as pool:
+    use_cuda = devices != ["cpu"]
+    cpu_limit = max(1, int(os.environ.get("VAEQL_MAX_CPU_WORKERS", cpu_count())))
+    workers = min(len(jobs), cpu_limit)
+    if use_cuda:
+        workers = min(workers, len(devices))
+    # CUDA subprocesses must use a clean interpreter rather than forked CUDA state.
+    # `get_context("spawn")` explicitly starts each worker in a fresh Python interpreter
+    context = get_context("spawn") if use_cuda else get_context()
+    with context.Pool(processes=workers) as pool:
         return list(pool.imap_unordered(_candidate_cv_worker, jobs))
 
 
@@ -388,7 +398,7 @@ def iterative_halving_search(
     data_full: np.ndarray,
     data_missing_nan: np.ndarray,
     data_X_mask: np.ndarray,
-    feature_specs: Sequence[OrderedFeature] | None = None,
+    feature_specs: Sequence[OrderedFeature],
 ) -> Dict[str, Any]:
     """Evaluate each current grid's four corners and halve toward its winner.
 
@@ -402,17 +412,15 @@ def iterative_halving_search(
     feat_type_dict = config.get("features_type_dict")
     if feat_type_dict is None:
         raise KeyError("Missing required config key: `features_type_dict`.")
-    if feature_specs is None:
-        feature_specs = config.get("ordered_feature_specs")
     _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, feat_type_dict)
+    if len(X_in) < 100:
+        raise ValueError(
+            f"Input data must contain at least 100 rows for cross-validation; got {len(X_in)}."
+        )
 
-    beta_lo, beta_hi = (float(value) for value in config["beta_range"])
-    C_lo, C_hi = (float(value) for value in config["C_range"])
-    alpha0 = float(config.get("granularity", 0.01))
-    if not beta_lo < beta_hi or not C_lo < C_hi:
-        raise ValueError("Both beta_range and C_range must have strictly increasing bounds.")
-    if not 0.0 < alpha0 < 1.0:
-        raise ValueError(f"granularity (relative width alpha_0) must be in (0, 1), got {alpha0}.")
+    beta_lo, beta_hi = config["beta_range"]
+    C_lo, C_hi = config["C_range"]
+    alpha0 = float(config["granularity"])
 
     beta_span0 = beta_hi - beta_lo
     C_span0 = C_hi - C_lo
@@ -449,7 +457,7 @@ def iterative_halving_search(
         if best_global is None or best_round["score"] < best_global["score"]:
             best_global = best_round
 
-        beta_t, C_t = float(best_round["beta"]), float(best_round["C"])
+        beta_t, C_t = best_round["beta"], best_round["C"]
         if beta_t == beta_lo:
             beta_hi = beta_mid
         elif beta_t == beta_hi:
@@ -472,6 +480,7 @@ def iterative_halving_search(
     return best_global
 
 
+## CHECKPOINT_HUMAN_REVIEW
 def train_and_save_best_model(
     beta_val: float,
     capacity_C: float,
@@ -479,7 +488,7 @@ def train_and_save_best_model(
     data_full: np.ndarray,
     data_missing_nan: np.ndarray,
     data_X_mask: np.ndarray,
-    feature_specs: Sequence[OrderedFeature] | None = None,
+    feature_specs: Sequence[OrderedFeature],
 ) -> str:
     """Train the selected model on all model-input rows and save its checkpoint.
 
@@ -492,8 +501,6 @@ def train_and_save_best_model(
     feat_type_dict = config.get("features_type_dict")
     if feat_type_dict is None:
         raise KeyError("Missing required config key: `features_type_dict`.")
-    if feature_specs is None:
-        feature_specs = config.get("ordered_feature_specs")
     _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, feat_type_dict)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -649,15 +656,21 @@ def load_and_patch_cv_config(
     missing = [key for key in required if key not in config]
     if missing:
         raise KeyError(f"cv config missing required keys: {missing!r}")
-    if "N" in config:
-        config["num_imputations"] = int(config["N"])
-    elif "num_imputations" in config:
-        config["num_imputations"] = int(config["num_imputations"])
-    elif "m" in config:
-        # Backward-compatible mapping from the repository's existing config.
-        config["num_imputations"] = int(config["m"])
-    else:
-        raise KeyError("cv config must define the number of imputation draws as N or legacy m.")
+    config["beta_range"], config["C_range"] = _validate_search_ranges(
+        config["beta_range"], config["C_range"]
+    )
+    config["granularity"] = _validate_granularity(
+        config.get("granularity", CV_BETA_C_TUNING_PARAMS["granularity"])
+    )
+    imputation_count_key = next(
+        (key for key in ("num_imputations", "N", "m") if key in config),
+        None
+    )
+    if imputation_count_key is None:
+        raise KeyError(
+            "cv config must define imputation draws using `num_imputations`, `N`, or `m`."
+        )
+    config["num_imputations"] = int(config[imputation_count_key])
     config.setdefault("halving_metric", "weighted_composite_metric")
     config["halving_metric"] = str(config["halving_metric"]).lower()
     if config["halving_metric"] != "weighted_composite_metric":
@@ -667,16 +680,14 @@ def load_and_patch_cv_config(
         )
     BetaGausMixedDVAETrainer._resolve_metric_weights(config)
     config["recycles"] = int(config["recycles"])
-    config["convergence_tolerance"] = validate_convergence_tolerance(
+    config["convergence_tolerance"] = _validate_convergence_tolerance(
         config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
     )
     if not 5 <= int(config["num_imputations"]) <= 20:
         raise ValueError("N, the number of imputation draws, must be between 5 and 20.")
     if not 5 <= config["recycles"] <= 20:
         raise ValueError("recycles, the number of imputation cycles, must be between 5 and 20.")
-    config["k_folds"] = int(config["k_folds"])
-    if config["k_folds"] not in {5, 10}:
-        raise ValueError("k_folds must be either 5 or 10.")
+    config["k_folds"] = _validate_k_folds(config["k_folds"])
     return config
 
 

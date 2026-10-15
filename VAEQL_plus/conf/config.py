@@ -35,7 +35,7 @@ DEFAULT_CONVERGENCE_TOLERANCE = float(
 )
 
 
-def validate_convergence_tolerance(value: Any) -> float:
+def _validate_convergence_tolerance(value: Any) -> float:
     """Return a finite score-improvement tolerance no smaller than 1e-4."""
     try:
         tolerance = float(value)
@@ -49,6 +49,64 @@ def validate_convergence_tolerance(value: Any) -> float:
             f"got {value!r}."
         )
     return tolerance
+
+
+def _validate_granularity(value: Any) -> float:
+    """Return a valid grid-width proportion in (0, 0.25]."""
+    try:
+        granularity = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("granularity must satisfy 0 < value <= 0.25.") from exc
+    if not math.isfinite(granularity) or not 0 < granularity <= 0.25:
+        raise ValueError("granularity must satisfy 0 < value <= 0.25.")
+    return granularity
+
+
+def _validate_k_folds(value: Any) -> int:
+    """Normalize and validate the supported cross-validation fold count."""
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"k_folds must be either 5 or 10, got {value!r}.") from exc
+    if not math.isfinite(numeric_value) or not numeric_value.is_integer():
+        raise ValueError(f"k_folds must be either 5 or 10, got {value!r}.")
+    k_folds = int(numeric_value)
+    if k_folds not in {5, 10}:
+        raise ValueError(f"k_folds must be either 5 or 10, got {value!r}.")
+    return k_folds
+
+
+def _validate_search_ranges(
+    beta_range: Any, C_range: Any
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Normalize and validate the beta and capacity search bounds."""
+    try:
+        beta_bounds = tuple(float(value) for value in beta_range)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("beta_range must contain exactly two numeric bounds.") from exc
+    try:
+        capacity_bounds = tuple(float(value) for value in C_range)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("C_range must contain exactly two numeric bounds.") from exc
+
+    if len(beta_bounds) != 2:
+        raise ValueError("beta_range must contain exactly two numeric bounds.")
+    if len(capacity_bounds) != 2:
+        raise ValueError("C_range must contain exactly two numeric bounds.")
+
+    beta_min, beta_max = beta_bounds
+    C_min, C_max = capacity_bounds
+    if not all(math.isfinite(value) for value in (*beta_bounds, *capacity_bounds)):
+        raise ValueError("beta_range and C_range bounds must be finite.")
+    if beta_min <= 0 or beta_max <= 0:
+        raise ValueError("beta_range entries must be > 0.")
+    if beta_min >= beta_max:
+        raise ValueError("Require beta_range[0] < beta_range[1].")
+    if C_min < 0 or C_max < 0:
+        raise ValueError("C_range entries must be >= 0.")
+    if C_min >= C_max:
+        raise ValueError("Require C_range[0] < C_range[1].")
+    return beta_bounds, capacity_bounds
 
 
 def _resolve_device():
@@ -128,22 +186,9 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
     ) -> "DisentangledBetaVaeTuningConfig":
         """Validate inputs and compute the minimum halving rounds from ``granularity``."""
 
-        b_min, b_max = beta_range
-        c_min, c_max = C_range
-        convergence_tolerance = validate_convergence_tolerance(convergence_tolerance)
-
-        if b_min <= 0 or b_max <= 0:
-            raise ValueError("beta_range entries must be > 0.")
-        if b_min >= b_max:
-            raise ValueError("Require beta_range[0] < beta_range[1].")
-
-        if c_min < 0 or c_max < 0:
-            raise ValueError("C_range entries must be >= 0.")
-        if c_min >= c_max:
-            raise ValueError("Require C_range[0] < C_range[1].")
-
-        if not (0 < granularity <= 0.25):
-            raise ValueError("granularity must satisfy 0 < value <= 0.25.")
+        beta_range, C_range = _validate_search_ranges(beta_range, C_range)
+        granularity = _validate_granularity(granularity)
+        convergence_tolerance = _validate_convergence_tolerance(convergence_tolerance)
 
         halving_rounds = math.ceil(math.log2(1.0 / granularity))
         if halving_rounds < 2:
@@ -161,8 +206,7 @@ class DisentangledBetaVaeTuningConfig(TypedDict):
                 "num_feat_loss_metric must resolve to 'RMSE' or 'MAE', "
                 f"got {num_feat_loss_metric!r}."
             )
-        if k_folds not in {5, 10}:
-            raise ValueError("k_folds must be either 5 or 10.")
+        k_folds = _validate_k_folds(k_folds)
         if not 5 <= recycles <= 20:
             raise ValueError("recycles must be between 5 and 20.")
         if not 5 <= num_imputations <= 20:

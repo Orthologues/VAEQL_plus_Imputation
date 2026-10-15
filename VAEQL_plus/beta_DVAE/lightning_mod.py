@@ -40,7 +40,8 @@ from typing_extensions import override
 from VAEQL_plus.conf.config import (
     DEFAULT_CONVERGENCE_TOLERANCE,
     DisentangledBetaVaeTuningConfig,
-    validate_convergence_tolerance,
+    _validate_convergence_tolerance,
+    _validate_k_folds,
 )
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 
@@ -497,9 +498,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 f"`amputation_mask` row count must match `preimputed_data_for_ref`; "
                 f"got {len(amputation_mask)!r} and {n_rows!r}."
             )
-        k_folds = int(config["k_folds"])
-        if k_folds not in {5, 10}:
-            raise ValueError(f"`k_folds` must be either 5 or 10, got {k_folds}")
+        k_folds = _validate_k_folds(config["k_folds"])
         if not (0 <= int(k_fold_idx) < k_folds):
             raise ValueError(f"`k_fold_idx` must satisfy 0 <= idx < {k_folds}, got {k_fold_idx}")
 
@@ -653,7 +652,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         Train one fold with periodic evaluation and simple convergence check.
         Returns (best_metric_val, epochs_ran).
         """
-        metric_improvement_tolerance = validate_convergence_tolerance(
+        metric_improvement_tolerance = _validate_convergence_tolerance(
             metric_improvement_tolerance
         )
         best_metric_val = math.inf
@@ -913,7 +912,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         device = torch.device(job_kwargs.get("device", "cpu"))
         k_folds = config["k_folds"]
         metric_weights = BetaGausMixedDVAETrainer._resolve_metric_weights(config)
-        metric_improvement_tolerance = validate_convergence_tolerance(
+        metric_improvement_tolerance = _validate_convergence_tolerance(
             config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
         )
         max_non_improved_rounds = config.get("convergence_patience", 10)

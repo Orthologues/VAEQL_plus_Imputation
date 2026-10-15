@@ -195,6 +195,7 @@ process STEP2_BETA_C_TUNING {
     test -s preprocessed_bundle/feature_dict.json
     mkdir -p model_artifacts gradients q_tables
 
+    VAEQL_MAX_CPU_WORKERS=${task.cpus} \
     ${params.python} -m VAEQL_plus.step2_beta_C_tuning.fine_tuner \
         --input_csv ${shell_quote(reference_pds)} \
         --feature_dict_json preprocessed_bundle/feature_dict.json \
