@@ -9,9 +9,13 @@ nextflow.enable.dsl=2
  * Nextflow does not stage or copy that reference through a `path` channel.
  *
  * Artifact directories are ordinary `path` outputs and therefore travel
- * between processes through Dataflow Channels. The Step 1 command must create:
+ * between processes through Dataflow Channels. The Step 1 command must serialize:
  *   preprocessed_bundle/preprocessed.csv
  *   preprocessed_bundle/feature_dict.json
+ *   preprocessed_bundle/ordered_feature_specs.json
+ *   preprocessed_bundle/missingness_mask.npy
+ * The feature-spec JSON is a list of {name, feat_type, base_feat} records;
+ * mask columns must match the CSV columns and rows must retain the same order.
  * Step 2 emits only beta/C tuning results. Step 3 is still an explicit adapter
  * because a DRL entry point is not present in the repository yet; it receives
  * the tuning results and initializes its own gradient, Q-table, model,
@@ -134,6 +138,8 @@ process STEP1_PREPROCESSING {
     mkdir -p preprocessed_bundle
     printf 'feature\\n' > preprocessed_bundle/preprocessed.csv
     printf '{}\\n' > preprocessed_bundle/feature_dict.json
+    printf '[]\\n' > preprocessed_bundle/ordered_feature_specs.json
+    touch preprocessed_bundle/missingness_mask.npy
     """
 
     script:
@@ -155,6 +161,8 @@ process STEP1_PREPROCESSING {
 
     test -s preprocessed_bundle/preprocessed.csv
     test -s preprocessed_bundle/feature_dict.json
+    test -s preprocessed_bundle/ordered_feature_specs.json
+    test -s preprocessed_bundle/missingness_mask.npy
     """
 }
 
@@ -185,18 +193,16 @@ process STEP2_BETA_C_TUNING {
     """
 
     script:
-    // The current fine_tuner consumes the reference PDS and the reviewed
-    // feature dictionary. The preprocessed bundle remains a channel artifact;
-    // a future tuning adapter can consume preprocessed.csv directly.
+    // Step 2 consumes X0, Phi, M, and the feature schema from Step 1 directly.
     """
     set -euo pipefail
-    test -f ${shell_quote(reference_pds)}
     test -s preprocessed_bundle/preprocessed.csv
     test -s preprocessed_bundle/feature_dict.json
+    test -s preprocessed_bundle/ordered_feature_specs.json
+    test -s preprocessed_bundle/missingness_mask.npy
     VAEQL_MAX_CPU_WORKERS=${task.cpus} \
     ${params.python} -m VAEQL_plus.step2_beta_C_tuning.fine_tuner \
-        --input_csv ${shell_quote(reference_pds)} \
-        --feature_dict_json preprocessed_bundle/feature_dict.json \
+        --preprocessed_dir preprocessed_bundle \
         --cv_config ${cv_config} \
         --results_path beta_analysis.csv \
         --summary_json best_beta_C_summary.json

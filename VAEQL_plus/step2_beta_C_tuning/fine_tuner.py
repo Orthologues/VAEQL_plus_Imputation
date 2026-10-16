@@ -10,7 +10,7 @@ import os
 import sys
 from multiprocessing import cpu_count, get_context
 from pathlib import Path
-from typing import Any, Dict, Literal, NamedTuple, Sequence, Tuple
+from typing import Any, Dict, NamedTuple, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -35,11 +35,7 @@ from VAEQL_plus.conf.config import (
     _validate_search_ranges,
 )
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
-from VAEQL_plus.step1_preprocessing.feat_preprocessor import (
-    FeaturePreprocessor,
-    OrderedFeature,
-)
-from VAEQL_plus.util.dataset_loader import load_dataset
+from VAEQL_plus.step1_preprocessing.feat_preprocessor import OrderedFeature
 
 
 class ValidationView(NamedTuple):
@@ -256,6 +252,8 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
     learning_rate = float(config["learning_rate"])
     batch_size = int(config["batch_size"])
     fold_scores: list[float] = []
+    fold_type3_counts: list[int] = []
+    fold_type4_counts: list[int] = []
 
     for fold_idx, (train_indices, val_indices) in enumerate(splits.split(X_in)):
         # Identical fold masks and initial weights across candidates make the
@@ -276,6 +274,8 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
             validation_source_mask,
             feat_type_dict,
         )
+        fold_type3_counts.append(int(np.count_nonzero(view.validation_mask == 3)))
+        fold_type4_counts.append(int(np.count_nonzero(view.validation_mask == 4)))
 
         train_tensor = torch.as_tensor(train_data, dtype=torch.float32)
         model = _new_model(X_in.shape[1], config, device)
@@ -349,6 +349,8 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         "C": capacity_C,
         "score": float(np.mean(fold_scores)),
         "fold_scores": tuple(float(score) for score in fold_scores),
+        "mean_type3_cells_per_fold": float(np.mean(fold_type3_counts)),
+        "mean_type4_cells_per_fold": float(np.mean(fold_type4_counts)),
         "metric": selection_metric,
         "metric_weights": metric_weights,
         "device": str(device),
@@ -479,90 +481,65 @@ def iterative_halving_search(
     return best_global
 
 
-def _fill_preexisting_nans(df: pd.DataFrame) -> pd.DataFrame:
-    """Complete source-missing entries for a finite reference matrix."""
-    out = df.copy()
-    for col in out.columns:
-        series = out[col]
-        if series.isna().any():
-            fill_value = float(series.mean()) if series.notna().any() else 0.0
-            out[col] = series.fillna(fill_value)
-    return out
-
-
-## CHECKPOINT_HUMAN_REVIEW
 def build_cv_matrices(
-    input_csv: Path,
-    feature_dict_json: Path,
-    missing_mechanism: str,
-    missing_rate: float,
-    pre_imputation_method: str,
-    pre_imputation_max_iter: int,
-    mice_num_imputations: int,
-    random_forest_n_estimators: int,
-    preprocessing_engine: Literal["auto", "pandas", "pyspark"] = "auto",
+    preprocessed_dir: Path,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[OrderedFeature, ...], Dict[str, Any]]:
-    """Build aligned reference/input arrays, source mask, feature specs, schema."""
-    feat_dict = FeaturesTypeDict.create(str(feature_dict_json))
-    raw_df = load_dataset(str(input_csv), feat_dict, engine=preprocessing_engine)
-    use_spark = not isinstance(raw_df, pd.DataFrame)
-    preprocessor = FeaturePreprocessor(
-        feat_dict=feat_dict,
-        missing_mechanism=missing_mechanism,
-        missing_rate=missing_rate,
-        input_df=raw_df,
-        use_spark=use_spark,
-        pre_imputation_method=pre_imputation_method,
-        pre_imputation_max_iter=pre_imputation_max_iter,
-        mice_num_imputations=mice_num_imputations,
-        random_forest_n_estimators=random_forest_n_estimators,
-    )
+    """Load Step 1's output, i.e., X0, Phi, M, and feature schema for fold evaluation."""
+    preprocessed_dir = Path(preprocessed_dir)
+    data_df = pd.read_csv(preprocessed_dir / "preprocessed.csv")
+    feature_dict = FeaturesTypeDict.create(str(preprocessed_dir / "feature_dict.json"))
+    source_mask = np.load(preprocessed_dir / "missingness_mask.npy", allow_pickle=False)
+    with open(preprocessed_dir / "ordered_feature_specs.json", "r", encoding="utf-8") as file:
+        spec_records = json.load(file)
 
-    (
-        pre_df,
-        real_cols,
-        pos_cols,
-        count_cols,
-        ord_groups,
-        bi_groups,
-        cat_groups,
-    ) = preprocessor._build_preprocessed_dataframe()
-    amputed_df, source_mask = preprocessor._apply_pyampute(
-        pre_df,
-        ord_groups,
-        cat_groups,
-    )
-    model_input_df = preprocessor._impute_amputed_values(amputed_df, source_mask)
+    columns = [str(column) for column in data_df.columns]
+    if len(columns) != len(set(columns)):
+        raise ValueError("Step 1 preprocessed data contains duplicate feature columns.")
+    if source_mask.ndim != 2 or source_mask.shape != data_df.shape:
+        raise ValueError(
+            "Step 1 missingness mask must match the preprocessed matrix shape; "
+            f"got {source_mask.shape} and {data_df.shape}."
+        )
+    if not np.isin(source_mask, (0, 1, 2)).all():
+        raise ValueError("Step 1 missingness mask must contain only values 0, 1, and 2.")
+    ordered_columns = sorted(columns)
+    column_indices = [columns.index(column) for column in ordered_columns]
+    if not isinstance(spec_records, list):
+        raise TypeError("Step 1 ordered feature specifications must be a JSON list.")
+    specs_by_name: Dict[str, OrderedFeature] = {}
+    required_spec_fields = {"name", "feat_type", "base_feat"}
+    for record in spec_records:
+        if not isinstance(record, dict) or not required_spec_fields.issubset(record):
+            raise ValueError(
+                "Each ordered feature specification must contain `name`, `feat_type`, and `base_feat`."
+            )
+        name = str(record["name"])
+        specs_by_name[name] = OrderedFeature(
+            name=name,
+            feat_type=str(record["feat_type"]),
+            base_feat=str(record["base_feat"]),
+        )
+    if len(specs_by_name) != len(spec_records) or set(specs_by_name) != set(ordered_columns):
+        raise ValueError(
+            "Step 1 feature specifications must contain exactly one entry per preprocessed column."
+        )
 
-    # The validation-amputation utility indexes columns in sorted feature-name
-    # order. Reorder every aligned object and Phi to that same order.
-    ordered_columns = sorted(str(column) for column in pre_df.columns)
-    reference_df = _fill_preexisting_nans(pre_df).loc[:, ordered_columns]
-    model_input_df = model_input_df.loc[:, ordered_columns]
-    column_indices = [list(pre_df.columns).index(column) for column in ordered_columns]
+    # Keep the sorted order required by the grouped-amputation utility, while
+    # preserving the aligned X0/M/Phi values emitted by Step 1.
+    X0 = data_df.loc[:, ordered_columns].to_numpy(dtype=np.float32, copy=True)
     source_mask = source_mask[:, column_indices].astype(np.int8, copy=False)
-    feature_specs = preprocessor._build_ordered_feature_ordered_feats(
-        ordered_cols=ordered_columns,
-        real_cols=real_cols,
-        pos_cols=pos_cols,
-        count_cols=count_cols,
-        ord_groups=ord_groups,
-        bi_groups=bi_groups,
-        cat_groups=cat_groups,
-    )
-
-    model_feat_dict: Dict[str, Any] = dict(feat_dict)
+    feature_specs = tuple(specs_by_name[column] for column in ordered_columns)
+    model_feat_dict: Dict[str, Any] = dict(feature_dict)
     model_feat_dict["all_feats"] = set(ordered_columns)
-    X_ref = reference_df.to_numpy(dtype=np.float32, copy=True)
-    X_in = model_input_df.to_numpy(dtype=np.float32, copy=True)
-    _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, model_feat_dict)
-    return X_ref, X_in, source_mask, feature_specs, model_feat_dict
+    # Type-0 cells in X0 retain their observed values and serve as validation
+    # references; the source mask excludes placeholder-filled type-1/2 cells.
+    _validate_aligned_data(X0, X0, source_mask, feature_specs, model_feat_dict)
+    return X0, X0, source_mask, feature_specs, model_feat_dict
 
 
 def load_and_patch_cv_config(
     cv_config_path: Path,
     results_path: Path,
-    k_folds_override: int | None,
 ) -> Dict[str, Any]:
     with open(cv_config_path, "r", encoding="utf-8") as f:
         config: Dict[str, Any] = json.load(f)
@@ -576,8 +553,6 @@ def load_and_patch_cv_config(
         **config,
     }
     config["results_path"] = str(results_path)
-    if k_folds_override is not None:
-        config["k_folds"] = int(k_folds_override)
 
     required = [
         "beta_range",
@@ -636,26 +611,17 @@ def load_and_patch_cv_config(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Step2 beta/C grid-halving CV tuner")
-    parser.add_argument("--input_csv", type=Path, required=True, help="Raw tabular dataset CSV path")
-    parser.add_argument("--feature_dict_json", type=Path, required=True, help="Feature-type JSON for FeaturesTypeDict")
+    parser.add_argument(
+        "--preprocessed_dir",
+        type=Path,
+        required=True,
+        help="Step 1 output bundle containing X0, ordered feature specs, mask, and schema",
+    )
     parser.add_argument(
         "--cv_config",
         type=Path,
         default=DisentangledBetaVaeTuningConfig.default_cv_beta_C_tuning_config_path(),
     )
-    parser.add_argument("--missing_mechanism", type=str, default="MAR", choices=["MAR", "MNAR", "MCAR"])
-    parser.add_argument("--missing_rate", type=float, default=0.1)
-    parser.add_argument("--pre_imputation_method", type=str, default="MICE")
-    parser.add_argument("--pre_imputation_max_iter", type=int, default=5)
-    parser.add_argument("--mice_num_imputations", type=int, default=5)
-    parser.add_argument("--random_forest_n_estimators", type=int, default=100)
-    parser.add_argument(
-        "--preprocessing_engine",
-        choices=["auto", "pandas", "pyspark"],
-        default="auto",
-        help="Use pandas, PySpark, or RAM-scaled automatic selection",
-    )
-    parser.add_argument("--k_folds", type=int, choices=(5, 10), default=None)
     step_dir = REPO_ROOT / "VAEQL_plus" / "step2_beta_C_tuning"
     parser.add_argument("--results_path", type=Path, default=step_dir / "beta_C_halving.csv")
     parser.add_argument("--summary_json", type=Path, default=step_dir / "best_beta_C_summary.json")
@@ -668,20 +634,11 @@ def main() -> None:
     args.summary_json.parent.mkdir(parents=True, exist_ok=True)
 
     X_ref, X_in, source_mask, feature_specs, feat_type_dict = build_cv_matrices(
-        input_csv=args.input_csv,
-        feature_dict_json=args.feature_dict_json,
-        missing_mechanism=args.missing_mechanism,
-        missing_rate=float(args.missing_rate),
-        pre_imputation_method=args.pre_imputation_method,
-        pre_imputation_max_iter=int(args.pre_imputation_max_iter),
-        mice_num_imputations=int(args.mice_num_imputations),
-        random_forest_n_estimators=int(args.random_forest_n_estimators),
-        preprocessing_engine=args.preprocessing_engine,
+        preprocessed_dir=args.preprocessed_dir,
     )
     config = load_and_patch_cv_config(
         cv_config_path=args.cv_config,
         results_path=args.results_path,
-        k_folds_override=args.k_folds,
     )
     config["features_type_dict"] = feat_type_dict
     config["ordered_feature_specs"] = feature_specs
@@ -693,6 +650,7 @@ def main() -> None:
         data_X_mask=source_mask,
         feature_specs=feature_specs,
     )
+    ## MARK
     summary = {
         "best_beta": float(best_candidate["beta"]),
         "best_C": float(best_candidate["C"]),
@@ -701,6 +659,10 @@ def main() -> None:
         "halving_metric_weights": best_candidate["metric_weights"],
         "num_imputations": int(config["num_imputations"]),
         "results_path": str(args.results_path),
+        "validation_amputation_counts": {
+            "mean_type3_cells_per_fold": best_candidate["mean_type3_cells_per_fold"],
+            "mean_type4_cells_per_fold": best_candidate["mean_type4_cells_per_fold"],
+        },
         "mask_counts": {
             "observed_0": int((source_mask == 0).sum()),
             "source_missing_1": int((source_mask == 1).sum()),
