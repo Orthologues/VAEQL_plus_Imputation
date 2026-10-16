@@ -1060,20 +1060,3 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         """
         from VAEQL_plus.step2_beta_C_tuning.fine_tuner import iterative_halving_search as _impl
         return _impl(config, preimputed_data_for_ref, amputated_data_for_val, amputation_mask)
-    
-    
-    @staticmethod
-    def train_and_save_best_model(
-        beta_val: float,
-        capacity_C: float,
-        config: Dict,
-        preimputed_data_for_ref: np.ndarray,
-        amputated_data_for_val: np.ndarray,
-        amputation_mask: np.ndarray,
-    ):
-        """
-        Compatibility wrapper.
-        Primary implementation lives in step2_beta_C_tuning/fine_tuner.py.
-        """
-        from VAEQL_plus.step2_beta_C_tuning.fine_tuner import train_and_save_best_model as _impl
-        return _impl(beta_val, capacity_C, config, preimputed_data_for_ref, amputated_data_for_val, amputation_mask)

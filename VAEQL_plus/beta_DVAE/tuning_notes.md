@@ -8,19 +8,19 @@
 - Entry point: `python -m VAEQL_plus.step2_beta_C_tuning.fine_tuner` runs a 4-corner halving search over $(\beta, C)$ ranges, parallelizing candidates across GPUs/CPUs. The default CV-config path is resolved through `VAEQL_plus.conf.config.DisentangledBetaVaeTuningConfig`.
 - Each halving iteration evaluates the four current corners via `run_candidate_cv` (full $K$-fold CV with early stopping) and shrinks the search box toward the winning corner until both spans are within `granularity * original_span`.
 - Epoch budgets come from `halving_epoch_budgets=[start_val, max_val, step_size]`: the first validation happens after `start_val` epochs, later validations advance by `step_size`, and training stops at `max_val`. Fallback remains `epoch_chunk`/`max_epochs` when budgets are absent. Convergence uses `convergence_tolerance` (finite and at least `1e-4`; default `1e-3`) and `convergence_patience`.
-- Metrics are logged to `beta_analysis.csv` for every fold/epoch chunk; the best $(\beta, C)$ is retrained once on fold 0 and checkpointed under `model_outdir`.
+- Metrics are logged to `beta_analysis.csv` for every fold/epoch chunk; the selected $(\beta, C)$ and CV score are written to `best_beta_C_summary.json`. Step 2 does not refit or export a model checkpoint; downstream Step 3 trains its own model using the selected parameters.
 
 ## Project Structure & Module Organization
 - `torch_nn.py` hosts the PyTorch $\beta$-VAE neural-network module.
 - `lightning_mod.py` hosts the Lightning training wrapper and $\beta$/C tuning helpers.
 - `utils.py` hosts shared masking helpers and coverage metrics.
 - The shared $\beta$/C tuning defaults and default CV-config path are exposed through `VAEQL_plus.conf.config.DisentangledBetaVaeTuningConfig`; keep edits consistent with that contract.
-- Long-running jobs emit `beta_analysis.csv`, `lock.txt`, and `trained_models/`; keep large artifacts out of git.
+- Long-running jobs emit `beta_analysis.csv`, `lock.txt`, and the best-parameter summary; keep generated artifacts out of git.
 
 ## Build, Test, and Development Commands
 - Set up an isolated env: `python -m venv .venv && source .venv/bin/activate` followed by `python -m pip install torch pandas scikit-learn`.
 - Run the halving search: `python -m VAEQL_plus.step2_beta_C_tuning.fine_tuner`, or pass `--cv_config` explicitly when overriding the config resolved by `DisentangledBetaVaeTuningConfig`.
-- Monitor progress with `tail -f beta_analysis.csv`; inspect checkpoints in `trained_models/` after runs.
+- Monitor progress with `tail -f beta_analysis.csv`; inspect `best_beta_C_summary.json` for the selected parameters and score.
 - For quick debugging, clone the config, keep `k_folds` at 5, shorten `halving_epoch_budgets`, or narrow `beta_range`/`C_range`, then point `--config` to the clone.
 
 ## Coding Style & Naming Conventions

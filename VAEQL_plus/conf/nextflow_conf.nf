@@ -12,9 +12,10 @@ nextflow.enable.dsl=2
  * between processes through Dataflow Channels. The Step 1 command must create:
  *   preprocessed_bundle/preprocessed.csv
  *   preprocessed_bundle/feature_dict.json
- * The Step 3 command is still an explicit adapter because a DRL entry point is
- * not present in the repository yet. It must create the declared final output
- * directories and evaluation statistics file.
+ * Step 2 emits only beta/C tuning results. Step 3 is still an explicit adapter
+ * because a DRL entry point is not present in the repository yet; it receives
+ * the tuning results and initializes its own gradient, Q-table, model,
+ * configuration, and evaluation artifact directories.
  *
  * Example AWS launch, after supplying a deployment config and commands:
  *   nextflow run VAEQL_plus/conf/nextflow_conf.nf \
@@ -175,11 +176,10 @@ process STEP2_BETA_C_TUNING {
     path cv_config
 
     output:
-    tuple val(run_id), val(reference_pds), path('model_artifacts'), path('gradients'), path('q_tables'), path('beta_analysis.csv'), path('best_beta_C_summary.json'), emit: tuning_artifacts
+    tuple val(run_id), val(reference_pds), path('beta_analysis.csv'), path('best_beta_C_summary.json'), emit: tuning_artifacts
 
     stub:
     """
-    mkdir -p model_artifacts gradients q_tables
     printf 'beta,C,score\\n' > beta_analysis.csv
     printf '{}\\n' > best_beta_C_summary.json
     """
@@ -193,15 +193,12 @@ process STEP2_BETA_C_TUNING {
     test -f ${shell_quote(reference_pds)}
     test -s preprocessed_bundle/preprocessed.csv
     test -s preprocessed_bundle/feature_dict.json
-    mkdir -p model_artifacts gradients q_tables
-
     VAEQL_MAX_CPU_WORKERS=${task.cpus} \
     ${params.python} -m VAEQL_plus.step2_beta_C_tuning.fine_tuner \
         --input_csv ${shell_quote(reference_pds)} \
         --feature_dict_json preprocessed_bundle/feature_dict.json \
         --cv_config ${cv_config} \
         --results_path beta_analysis.csv \
-        --model_outdir model_artifacts \
         --summary_json best_beta_C_summary.json
     """
 }
@@ -221,14 +218,14 @@ process STEP3_DRL_TRAINING {
     publishDir params.publish_dir, mode: 'copy', overwrite: true
 
     input:
-    tuple val(run_id), val(reference_pds), path('model_artifacts'), path('gradients'), path('q_tables'), path('beta_analysis.csv'), path('best_beta_C_summary.json')
+    tuple val(run_id), val(reference_pds), path('beta_analysis.csv'), path('best_beta_C_summary.json')
 
     output:
-    tuple val(run_id), path('final_model'), path('run_config'), path('evaluation'), emit: final_artifacts
+    tuple val(run_id), path('final_model'), path('run_config'), path('evaluation'), path('gradients'), path('q_tables'), emit: final_artifacts
 
     stub:
     """
-    mkdir -p final_model run_config evaluation
+    mkdir -p final_model run_config evaluation gradients q_tables
     touch final_model/model.pt
     printf '{}\\n' > run_config/config.json
     printf '{}\\n' > evaluation/evaluation_statistics.json
@@ -245,11 +242,10 @@ process STEP3_DRL_TRAINING {
     test -f ${shell_quote(reference_pds)}
     test -s beta_analysis.csv
     test -s best_beta_C_summary.json
-    mkdir -p final_model run_config evaluation
+    mkdir -p final_model run_config evaluation gradients q_tables
 
     ${params.step3_command} \
         --reference-pds ${shell_quote(reference_pds)} \
-        --model-dir model_artifacts \
         --gradients-dir gradients \
         --q-tables-dir q_tables \
         --beta-summary best_beta_C_summary.json \
@@ -258,6 +254,8 @@ process STEP3_DRL_TRAINING {
     test -d final_model
     test -d run_config
     test -s evaluation/evaluation_statistics.json
+    test -d gradients
+    test -d q_tables
     """
 }
 

@@ -242,9 +242,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         )
     selection_metric = "weighted_composite_metric"
     metric_weights = BetaGausMixedDVAETrainer._resolve_metric_weights(config)
-    budgets = config.get("halving_epoch_budgets", (30, 300, 30))
-    if len(budgets) != 3:
-        raise ValueError("halving_epoch_budgets must be [first_eval_epochs, max_epochs, eval_interval].")
+    budgets = config["halving_epoch_budgets"]
     first_eval_epochs, max_epochs, eval_interval = (int(value) for value in budgets)
     if min(first_eval_epochs, max_epochs, eval_interval) <= 0 or first_eval_epochs > max_epochs:
         raise ValueError(f"Invalid halving_epoch_budgets: {budgets!r}.")
@@ -268,6 +266,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         if device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
 
+        # Train on the other K-1 folds; reserve this held-out fold for validation scoring.
         train_data = X_in[train_indices]
         validation_base = X_in[val_indices]
         validation_ref = X_ref[val_indices]
@@ -480,70 +479,6 @@ def iterative_halving_search(
     return best_global
 
 
-## CHECKPOINT_HUMAN_REVIEW
-def train_and_save_best_model(
-    beta_val: float,
-    capacity_C: float,
-    config: Dict[str, Any],
-    data_full: np.ndarray,
-    data_missing_nan: np.ndarray,
-    data_X_mask: np.ndarray,
-    feature_specs: Sequence[OrderedFeature],
-) -> str:
-    """Train the selected model on all model-input rows and save its checkpoint.
-
-    This is a post-search CLI action, separate from the cross-validation
-    algorithm. CV folds themselves always train on fold-exclusive rows.
-    """
-    X_ref = np.asarray(data_full, dtype=np.float32)
-    X_in = np.asarray(data_missing_nan, dtype=np.float32)
-    source_mask = np.asarray(data_X_mask, dtype=np.int8)
-    feat_type_dict = config.get("features_type_dict")
-    if feat_type_dict is None:
-        raise KeyError("Missing required config key: `features_type_dict`.")
-    _validate_aligned_data(X_ref, X_in, source_mask, feature_specs, feat_type_dict)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _new_model(X_in.shape[1], config, device)
-    use_adam = bool(config.get("use_adam_optimizer", True))
-    learning_rate = float(config["learning_rate"])
-    optimizer = (
-        torch.optim.Adam(model.parameters(), lr=learning_rate)
-        if use_adam
-        else torch.optim.SGD(model.parameters(), lr=learning_rate)
-    )
-    budgets = config.get("halving_epoch_budgets", (30, 300, 30))
-    final_epochs = int(budgets[1]) if len(budgets) == 3 else int(config.get("max_epochs", 100))
-    BetaGausMixedDVAETrainer.train_one_fold(
-        model=model,
-        optimizer=optimizer,
-        use_adam=use_adam,
-        lr=learning_rate,
-        train_tensor=torch.as_tensor(X_in, dtype=torch.float32),
-        epochs=final_epochs,
-        beta=float(beta_val),
-        capacity_C=float(capacity_C),
-        device=device,
-        feat_type_dict=feat_type_dict,
-        batch_size=int(config["batch_size"]),
-    )
-
-    outdir = Path(config.get("model_outdir", "./trained_models"))
-    outdir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = outdir / f"beta{beta_val}_C{capacity_C}.pt"
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "beta": float(beta_val),
-            "C": float(capacity_C),
-            "epochs": final_epochs,
-            "config": config,
-        },
-        checkpoint_path,
-    )
-    return str(checkpoint_path)
-
-
 def _fill_preexisting_nans(df: pd.DataFrame) -> pd.DataFrame:
     """Complete source-missing entries for a finite reference matrix."""
     out = df.copy()
@@ -555,6 +490,7 @@ def _fill_preexisting_nans(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+## CHECKPOINT_HUMAN_REVIEW
 def build_cv_matrices(
     input_csv: Path,
     feature_dict_json: Path,
@@ -626,7 +562,6 @@ def build_cv_matrices(
 def load_and_patch_cv_config(
     cv_config_path: Path,
     results_path: Path,
-    model_outdir: Path,
     k_folds_override: int | None,
 ) -> Dict[str, Any]:
     with open(cv_config_path, "r", encoding="utf-8") as f:
@@ -641,7 +576,6 @@ def load_and_patch_cv_config(
         **config,
     }
     config["results_path"] = str(results_path)
-    config["model_outdir"] = str(model_outdir)
     if k_folds_override is not None:
         config["k_folds"] = int(k_folds_override)
 
@@ -656,6 +590,15 @@ def load_and_patch_cv_config(
     missing = [key for key in required if key not in config]
     if missing:
         raise KeyError(f"cv config missing required keys: {missing!r}")
+    budgets = config.get(
+        "halving_epoch_budgets",
+        CV_BETA_C_TUNING_PARAMS["halving_epoch_budgets"],
+    )
+    if not isinstance(budgets, (list, tuple)) or len(budgets) != 3:
+        raise ValueError(
+            "halving_epoch_budgets must contain [first_eval_epochs, max_epochs, eval_interval]."
+        )
+    config["halving_epoch_budgets"] = tuple(budgets)
     config["beta_range"], config["C_range"] = _validate_search_ranges(
         config["beta_range"], config["C_range"]
     )
@@ -715,7 +658,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--k_folds", type=int, choices=(5, 10), default=None)
     step_dir = REPO_ROOT / "VAEQL_plus" / "step2_beta_C_tuning"
     parser.add_argument("--results_path", type=Path, default=step_dir / "beta_C_halving.csv")
-    parser.add_argument("--model_outdir", type=Path, default=step_dir / "trained_models")
     parser.add_argument("--summary_json", type=Path, default=step_dir / "best_beta_C_summary.json")
     return parser.parse_args()
 
@@ -723,7 +665,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.results_path.parent.mkdir(parents=True, exist_ok=True)
-    args.model_outdir.mkdir(parents=True, exist_ok=True)
     args.summary_json.parent.mkdir(parents=True, exist_ok=True)
 
     X_ref, X_in, source_mask, feature_specs, feat_type_dict = build_cv_matrices(
@@ -740,22 +681,12 @@ def main() -> None:
     config = load_and_patch_cv_config(
         cv_config_path=args.cv_config,
         results_path=args.results_path,
-        model_outdir=args.model_outdir,
         k_folds_override=args.k_folds,
     )
     config["features_type_dict"] = feat_type_dict
     config["ordered_feature_specs"] = feature_specs
 
     best_candidate = iterative_halving_search(
-        config=config,
-        data_full=X_ref,
-        data_missing_nan=X_in,
-        data_X_mask=source_mask,
-        feature_specs=feature_specs,
-    )
-    checkpoint_path = train_and_save_best_model(
-        beta_val=float(best_candidate["beta"]),
-        capacity_C=float(best_candidate["C"]),
         config=config,
         data_full=X_ref,
         data_missing_nan=X_in,
@@ -769,7 +700,6 @@ def main() -> None:
         "halving_metric": str(best_candidate["metric"]),
         "halving_metric_weights": best_candidate["metric_weights"],
         "num_imputations": int(config["num_imputations"]),
-        "checkpoint_path": checkpoint_path,
         "results_path": str(args.results_path),
         "mask_counts": {
             "observed_0": int((source_mask == 0).sum()),

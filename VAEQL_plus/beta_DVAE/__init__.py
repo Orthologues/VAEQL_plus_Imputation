@@ -13,7 +13,7 @@ __class_exports__ = [
     "BetaGausMixedDVAETrainer",
     "BetaGausMixedDVAEUtils"
 ]
-__method_exports__ = ["iterative_halving_search", "train_and_save_best_model"]
+__method_exports__ = ["iterative_halving_search"]
 
 __all__ = __module_exports__ + __class_exports__ + __method_exports__
 

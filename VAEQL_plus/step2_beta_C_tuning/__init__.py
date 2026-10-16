@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__methods__ = ["iterative_halving_search", "train_and_save_best_model"]
+__methods__ = ["iterative_halving_search"]
 __all__ = __methods__
 
 
