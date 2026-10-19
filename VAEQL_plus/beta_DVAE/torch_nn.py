@@ -32,7 +32,7 @@ class BetaGausMixedDVAE(nn.Module):
     - trainable GMM prior parameters (`pi_k`, `mu_k`, `logvar_k`)
 
     Shapes:
-    - input `x`: `(B, D)` where `B` is batch size and `D` is feature dimension.
+    - input `x` and missingness mask `X_mask`: `(B, D)`, where mask value 0 is observed.
     - component logits/probabilities: `(B, K)`.
     - latent tensors: `(B, Z)`.
     - reconstruction logits: `(B, D)` in preprocessed feature space.
@@ -108,9 +108,9 @@ class BetaGausMixedDVAE(nn.Module):
         self.num_feat_loss_metric = self._normalize_num_feat_loss_metric(num_feat_loss_metric)
         self.batch_size = batch_size
 
-        # vanilla encoder trunk: D -> hidden
+        # Condition the encoder on the observed indicator alongside the filled values.
         vanilla_encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim1),
+            nn.Linear(2 * input_dim, hidden_dim1),
             nn.ReLU(),
             nn.Linear(hidden_dim1, hidden_dim2),
             nn.ReLU(),
@@ -126,9 +126,9 @@ class BetaGausMixedDVAE(nn.Module):
             "gmm_encoder": gmm_encoder,
         })
 
-        # decoder
+        # Condition the decoder on the same observed indicator.
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim2),
+            nn.Linear(latent_dim + input_dim, hidden_dim2),
             nn.ReLU(),
             nn.Linear(hidden_dim2, hidden_dim1),
             nn.ReLU(),
@@ -180,10 +180,20 @@ class BetaGausMixedDVAE(nn.Module):
             f"`num_feat_loss_metric` must be one of 'RMSE' or 'MAE', got {num_feat_loss_metric!r}"
         )
 
+    def _observed_indicator(self, X_mask: ArrayLike, reference: torch.Tensor) -> torch.Tensor:
+        """Map the repository's mask (0=observed) to the paper's indicator (1=observed)."""
+        mask_t = torch.as_tensor(X_mask, device=reference.device)
+        expected_shape = (reference.shape[0], self.input_dim)
+        if tuple(mask_t.shape) != expected_shape:
+            raise ValueError(
+                f"`X_mask` must have shape {expected_shape}, got {tuple(mask_t.shape)}"
+            )
+        return (mask_t == 0).to(dtype=reference.dtype)
+
     # Encoding
-    def encode(self, x: torch.Tensor) -> "BetaGausMixedDVAE.EncodingOutput":
+    def encode(self, x: torch.Tensor, X_mask: ArrayLike) -> "BetaGausMixedDVAE.EncodingOutput":
         """
-        Encode `x` through D -> K -> Z.
+        Encode filled `x` and its observed indicator through 2D -> K -> Z.
 
         Returns:
         - `posterior_k_logits`: `(B, K)`
@@ -191,7 +201,8 @@ class BetaGausMixedDVAE(nn.Module):
         - `posterior_z_component_mean`: `(B, K, Z)` K-conditioned means
         - `posterior_z_component_logvar`: `(B, K, Z)` K-conditioned log-variances
         """
-        encoded_head = self.encoder["vanilla_encoder"](x)
+        observed = self._observed_indicator(X_mask, x)
+        encoded_head = self.encoder["vanilla_encoder"](torch.cat((x, observed), dim=1))
         posterior_k_logits = self.encoder["gmm_encoder"]["k_logits_head"](encoded_head)  # (B, K)
         posterior_k_probs = torch.softmax(posterior_k_logits, dim=1)   # (B, K)
 
@@ -261,9 +272,10 @@ class BetaGausMixedDVAE(nn.Module):
         return torch.sum(relaxed_k * component_z, dim=1)
 
     # Decoding and Reconstruction
-    def decode(self, posterior_z: torch.Tensor) -> torch.Tensor:
-        """Decode latent samples `z` into reconstruction logits in feature space."""
-        return self.decoder(posterior_z)
+    def decode(self, posterior_z: torch.Tensor, X_mask: ArrayLike) -> torch.Tensor:
+        """Decode latent samples conditional on the observed indicator."""
+        observed = self._observed_indicator(X_mask, posterior_z)
+        return self.decoder(torch.cat((posterior_z, observed), dim=1))
 
     @staticmethod
     def _ordered_ordinal_logits(ordinal_raw: torch.Tensor) -> torch.Tensor:
@@ -365,9 +377,9 @@ class BetaGausMixedDVAE(nn.Module):
         return recon
 
     # Implementation of the mandatory `forward` method in a `torch.nn` module
-    def forward(self, x) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, X_mask: ArrayLike) -> Dict[str, torch.Tensor]:
         """
-        Forward pass.
+        Forward pass with 0=observed and nonzero=missing in `X_mask`.
 
         Returns:
         - `recon_logits`: `(B, D)`
@@ -376,13 +388,13 @@ class BetaGausMixedDVAE(nn.Module):
         - `posterior_z_component_mean`: `(B, K, Z)`
         - `posterior_z_component_logvar`: `(B, K, Z)`
         """
-        encoded = self.encode(x)
+        encoded = self.encode(x, X_mask)
         z = self.reparameterize_mixture(
             encoded.posterior_z_component_mean,
             encoded.posterior_z_component_logvar,
             encoded.posterior_k_logits,
         )
-        recon_logits = self.decode(z)
+        recon_logits = self.decode(z, X_mask)
         return {
             "recon_logits": recon_logits,
             "posterior_k_logits": encoded.posterior_k_logits,
@@ -536,6 +548,7 @@ class BetaGausMixedDVAE(nn.Module):
 
         Behavior:
         - reconstruction loss weighting uses only type-0 cells (`obs_mask == 0`),
+          with zero reconstruction loss for a minibatch containing no type-0 cells,
         - uses transformed-space RMSE/MAE on numeric/count-style columns,
         - uses BCE-with-logits on binary columns and monotone ordinal cumulative logits,
         - uses categorical CE on each categorical one-hot group with per-row observed-weighting,
@@ -566,9 +579,6 @@ class BetaGausMixedDVAE(nn.Module):
             raise ValueError(
                 f"`obs_mask` can only contain values from {{0, 1, 2}}, got {sorted(obs_mask_unique_vals)}"
             )
-        if 0 not in obs_mask_unique_vals:
-            raise ValueError("`obs_mask` must contain value 0 for reconstruction-loss weighting.")
-        
         num_feat_loss_type = self.num_feat_loss_metric
         
         ord_feats = feat_type_dict.get("ord_feats", {})
@@ -678,11 +688,15 @@ class BetaGausMixedDVAE(nn.Module):
                 else weighted_mae
             )
 
-        if not loss_terms:
-            raise ValueError("No observed feature groups were available for reconstruction loss.")
         # hybrid type-aware reconstruction objective: ordinal/categorical expansions are
         # averaged inside their original feature group before this final average.
-        recon_loss = torch.stack(loss_terms).mean()
+        # An all-missing minibatch contributes no reconstruction term; its KL term
+        # still participates in training.
+        recon_loss = (
+            torch.stack(loss_terms).mean()
+            if loss_terms
+            else recon_logits.sum() * 0.0
+        )
 
         kl_output = self.gmm_kl_decomposed(
             posterior_z_component_mean=posterior_z_component_mean,
@@ -734,7 +748,7 @@ class BetaGausMixedDVAE(nn.Module):
 
         Behavior:
         - expects `X_incomplete` to be already pre-imputed (no NaN values allowed)
-        - repeatedly run model forward (with stochastic latent sampling)
+        - repeatedly run model forward with the fixed mask (and stochastic latent sampling)
         - for each cycle, compute reconstruction loss on type-0 cells using `X_incomplete` as reference
         - reset type-0 cells to their original observed values after each cycle loss is computed
         - keep type-1 (pre-existing missing, already pre-imputed) cells unchanged
@@ -799,7 +813,7 @@ class BetaGausMixedDVAE(nn.Module):
                     # since we do not apply gradient descents here, forward can be run under `torch.no_grad()` context to save memory
                     with torch.no_grad():
                         # `temp_x_t` is already pre-imputed, so forward pass can proceed without NaN issues
-                        output_t = self.forward(temp_x_t) 
+                        output_t = self.forward(temp_x_t, x_mask_t)
                         recon = self.activate_reconstruction(output_t["recon_logits"], feat_type_dict)
 
                     pred_vals = recon[eval_mask]
@@ -855,7 +869,7 @@ class BetaGausMixedDVAE(nn.Module):
 
         Behavior:
         - expects `X_incomplete` to be already pre-imputed (no NaN values allowed)
-        - repeatedly run model forward (with stochastic latent sampling)
+        - repeatedly run model forward with the fixed mask (and stochastic latent sampling)
         - keep type-0 and type-1 cells fixed at their `X_incomplete` values
         - retain iterative updates only for type-2 cells (`X_mask == 2`)
 
@@ -893,7 +907,7 @@ class BetaGausMixedDVAE(nn.Module):
             for iter_idx in range(max_iter):
                 try:
                     with torch.no_grad():
-                        output_t = self.forward(temp_x_t)
+                        output_t = self.forward(temp_x_t, x_mask_t)
                         recon = self.activate_reconstruction(output_t["recon_logits"], feat_type_dict)
                     temp_x_t = torch.where(update_mask, recon, x_incomplete_t)
                 except Exception as exc:

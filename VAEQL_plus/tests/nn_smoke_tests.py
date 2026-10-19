@@ -200,20 +200,21 @@ def _forward_with_vanilla_softmax(
     model: BetaGausMixedDVAE,
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, BetaGausMixedDVAE.EncodingOutput]:
-    encoded = model.encode(x)
+    observed_mask = torch.zeros_like(x, dtype=torch.int8)
+    encoded = model.encode(x, observed_mask)
     component_z = model.reparameterize_gaussian(
         encoded.posterior_z_component_mean,
         encoded.posterior_z_component_logvar,
     )
     k_weights = torch.softmax(encoded.posterior_k_logits, dim=1)
     z = torch.sum(k_weights.unsqueeze(-1) * component_z, dim=1)
-    return model.decode(z), encoded
+    return model.decode(z, observed_mask), encoded
 
 
 def test_component_wise_posterior_sampling_keeps_gmm_axis() -> None:
     x = _build_toy_batch()
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
-    encoded = model.encode(x)
+    encoded = model.encode(x, torch.zeros_like(x, dtype=torch.int8))
 
     expected_component_shape = (x.shape[0], model.k_gmm, model.z_dim)
     assert encoded.posterior_z_component_mean.shape == expected_component_shape
@@ -241,6 +242,45 @@ def test_component_wise_posterior_sampling_keeps_gmm_axis() -> None:
             aggregated_logvar,
             encoded.posterior_k_logits,
         )
+
+
+def test_encoder_and_decoder_condition_on_observed_mask() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    observed_mask = torch.zeros_like(x, dtype=torch.int8)
+    source_missing_mask = torch.ones_like(x, dtype=torch.int8)
+    amputed_mask = torch.full_like(observed_mask, 2)
+
+    observed_encoding = model.encode(x, observed_mask)
+    missing_encoding = model.encode(x, source_missing_mask)
+    assert not torch.equal(observed_encoding.posterior_k_logits, missing_encoding.posterior_k_logits)
+    torch.testing.assert_close(
+        missing_encoding.posterior_k_logits,
+        model.encode(x, amputed_mask).posterior_k_logits,
+    )
+
+    z = torch.ones(x.shape[0], model.z_dim)
+    observed_reconstruction = model.decode(z, observed_mask)
+    missing_reconstruction = model.decode(z, source_missing_mask)
+    assert not torch.equal(observed_reconstruction, missing_reconstruction)
+    torch.testing.assert_close(missing_reconstruction, model.decode(z, amputed_mask))
+
+    with pytest.raises(ValueError, match="X_mask"):
+        model(x, observed_mask[:, :-1])
+
+
+def test_iterative_imputation_retains_observed_values_with_mask() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    source_mask = torch.zeros_like(x, dtype=torch.int8)
+    source_mask[:, 0] = 2
+    source_mask[:, 1] = 1
+
+    imputed = model.impute_multiple(
+        x, max_iter=2, X_mask=source_mask, feat_type_dict=FEAT_TYPE_DICT
+    )
+    torch.testing.assert_close(imputed[source_mask != 2], x[source_mask != 2])
+    assert torch.isfinite(imputed).all()
 
 
 def test_randomized_k_logits_activation_selection_summary() -> None:
@@ -278,7 +318,7 @@ def test_randomized_k_logits_activation_selection_summary() -> None:
                     posterior_k_probs=encoded.posterior_k_probs,
                 )
             else:
-                out = model(x)
+                out = model(x, torch.zeros_like(x, dtype=torch.int8))
                 loss, grad_sum, _grad_shape = _reconstruction_loss_and_grad(
                     model=model,
                     x=x,
@@ -361,7 +401,7 @@ def test_k_logits_backprop_with_gumbel_softmax_tau_grid() -> None:
     for tau in (1.0, 0.5, 0.25, 0.1, 2.0, 4.0, 10.0):
         model = _build_Gumbel_Softmax_model(tau_start=tau)
         torch.manual_seed(NN_SMOKE_TEST_SEED)
-        out = model(x)
+        out = model(x, torch.zeros_like(x, dtype=torch.int8))
 
         _reconstruction_loss_and_grad(
             model=model,
@@ -376,7 +416,7 @@ def test_k_logits_backprop_with_gumbel_softmax_tau_grid() -> None:
 def test_reconstruction_loss_counts_encoded_groups_once() -> None:
     x = _build_toy_batch()
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
-    encoded = model.encode(x)
+    encoded = model.encode(x, torch.zeros_like(x, dtype=torch.int8))
     recon_logits = torch.zeros_like(x)
 
     loss = model.beta_capacity_loss(
@@ -442,6 +482,56 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
         expected.to(dtype=loss.recon_loss.dtype),
         atol=1e-6,
     )
+
+
+def test_reconstruction_loss_excludes_type1_and_type2_targets() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    obs_mask = torch.zeros_like(x, dtype=torch.int8)
+    obs_mask[:, 0] = 1
+    obs_mask[:, 1] = 2
+    output = model(x, obs_mask)
+
+    def calculate(target: torch.Tensor) -> torch.Tensor:
+        return model.beta_capacity_loss(
+            recon_logits=output["recon_logits"],
+            x_obs_processed=target,
+            posterior_z_component_mean=output["posterior_z_component_mean"],
+            posterior_z_component_logvar=output["posterior_z_component_logvar"],
+            posterior_k_probs=output["posterior_k_probs"],
+            beta=0.0,
+            capacity_C=0.0,
+            gmm_prior=model.get_gmm_prior_params(),
+            feat_type_dict=FEAT_TYPE_DICT,
+            obs_mask=obs_mask,
+        ).recon_loss
+
+    original_loss = calculate(x)
+    changed_targets = x.clone()
+    changed_targets[:, 0] = 123.0
+    changed_targets[:, 1] = -456.0
+    changed_loss = calculate(changed_targets)
+    assert torch.isclose(original_loss, changed_loss)
+
+
+def test_all_missing_minibatch_has_zero_reconstruction_term() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    output = model(x, torch.ones_like(x, dtype=torch.int8))
+    loss = model.beta_capacity_loss(
+        recon_logits=output["recon_logits"],
+        x_obs_processed=x,
+        posterior_z_component_mean=output["posterior_z_component_mean"],
+        posterior_z_component_logvar=output["posterior_z_component_logvar"],
+        posterior_k_probs=output["posterior_k_probs"],
+        beta=1.0,
+        capacity_C=0.0,
+        gmm_prior=model.get_gmm_prior_params(),
+        feat_type_dict=FEAT_TYPE_DICT,
+        obs_mask=torch.ones_like(x, dtype=torch.int8),
+    )
+    assert torch.equal(loss.recon_loss, torch.tensor(0.0))
+    assert torch.isfinite(loss.total)
 
 
 def test_ordinal_activation_enforces_monotone_cumulative_probs() -> None:

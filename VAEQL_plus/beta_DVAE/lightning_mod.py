@@ -81,20 +81,22 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         "prop_99q",
     }
     DEFAULT_CAND_METRIC_WEIGHTS: Dict[str, float] = {  # noqa: RUF012
-        "multi_mae": 5 / 14,
-        "multi_rmse": 5 / 14,
-        "prop_80q": 1 / 14,
-        "prop_90q": 1 / 14,
-        "prop_95q": 2 / 14,
-        "prop_99q": 0.0,
+        "multi_mae": 5 / 15,
+        "multi_rmse": 5 / 15,
+        "prop_80q": 1 / 15,
+        "prop_90q": 1 / 15,
+        "prop_95q": 2 / 15,
+        "prop_99q": 1 / 15,
     }
     
     class SplitTrainingValidationOutput(NamedTuple):
         """
         K-fold split output.
         `training_input` is the fold-updated numeric training matrix, with the same number of columns as `validation_input`.
+        `training_mask` retains the aligned source missingness types for loss weighting.
         """
         training_input: ArrayLike
+        training_mask: ArrayLike
         validation_input: ArrayLike
         validation_mask: ArrayLike
         pre_val_amputation_mask: ArrayLike
@@ -166,8 +168,8 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
 
 
     @override
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return self.model(x)
+    def forward(self, x: torch.Tensor, obs_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
+        return self.model(x, obs_mask)
 
 
     @override
@@ -179,11 +181,17 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     @override
     def training_step(
         self,
-        batch: torch.Tensor | Tuple[torch.Tensor, ...] | List[torch.Tensor],
+        batch: Tuple[torch.Tensor, torch.Tensor] | List[torch.Tensor],
     ) -> torch.Tensor:
-        input_t = batch[0] if isinstance(batch, (list, tuple)) else batch
-        output_t = self.model(input_t)
-        obs_mask = torch.zeros_like(input_t, dtype=torch.int8)
+        if not isinstance(batch, (tuple, list)):
+            raise TypeError("`batch` must be a tuple or list containing input and obs_mask tensors.")
+        if len(batch) != 2:
+            raise ValueError(f"`batch` must contain exactly two tensors, got {len(batch)} items.")
+        input_t, obs_mask = batch
+        if not isinstance(input_t, torch.Tensor) or not isinstance(obs_mask, torch.Tensor):
+            raise TypeError("`batch` items must both be torch tensors: (input, obs_mask).")
+        obs_mask = obs_mask.to(device=input_t.device, dtype=torch.int8)
+        output_t = self.model(input_t, obs_mask)
         loss_output = self.model.beta_capacity_loss(
             recon_logits=output_t["recon_logits"],
             x_obs_processed=input_t,
@@ -543,9 +551,14 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             amputated_data_for_val,
             dtype=torch.float32,
         ).clone()
+        training_mask = BetaGausMixedDVAEUtils.as_torch_tensor(
+            amputation_mask,
+            dtype=torch.int8,
+        )
     
         return BetaGausMixedDVAETrainer.SplitTrainingValidationOutput(
             training_input=BetaGausMixedDVAEUtils.as_torch_tensor(training_input, dtype=torch.float32),
+            training_mask=training_mask,
             validation_input=BetaGausMixedDVAEUtils.as_torch_tensor(validation_input, dtype=torch.float32),
             validation_mask=BetaGausMixedDVAEUtils.as_torch_tensor(validation_mask, dtype=torch.int8),
             pre_val_amputation_mask=BetaGausMixedDVAEUtils.as_torch_tensor(pre_val_amputation_mask, dtype=torch.int8),
@@ -567,6 +580,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         capacity_C: float,
         device: torch.device,
         feat_type_dict: FeaturesTypeDict,
+        train_mask: torch.Tensor,
         # We expect the cohort sizes of the to-be-imputed clinical datasets to range between circa 3K-30K, therefore, 
         # a batch size of 128 should be reasonable for stable training without out of memory (OOM) on a single GPU; 
         # this can be tuned if needed
@@ -576,12 +590,20 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
     ) -> "BetaGausMixedDVAETrainer.TrainOneFoldOutput":
         """
         Train VAE for `epochs` on the given fold's training data with Lightning.
+        `train_mask` uses 0=observed, 1=source-missing,
+        and 2=previously amputed; only type-0 cells contribute to reconstruction loss.
         Returns the latest mini-batch loss tuple:
         (last_loss, last_recon, last_kl, last_kl_disc, last_kl_cont).
         """
         if int(starting_epoch) < 0:
             raise ValueError(f"starting_epoch must be nonnegative, got {starting_epoch!r}.")
-        idxed_train_t = TensorDataset(train_tensor)
+        train_mask = torch.as_tensor(train_mask, dtype=torch.int8, device="cpu")
+        if train_mask.shape != train_tensor.shape:
+            raise ValueError(
+                "`train_mask` must have the same shape as `train_tensor`; "
+                f"got {tuple(train_mask.shape)} and {tuple(train_tensor.shape)}."
+            )
+        idxed_train_t = TensorDataset(train_tensor, train_mask)
         loader = DataLoader(idxed_train_t, batch_size=batch_size, shuffle=True, drop_last=False)
         lightning_mod = BetaGausMixedDVAETrainer(
             model=model,
@@ -633,6 +655,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         capacity_C: float,
         device: torch.device,
         feat_type_dict: FeaturesTypeDict,
+        train_mask: torch.Tensor,
         batch_size: int,
         start_epoch: int,
         epochs_between_evals: int,
@@ -646,7 +669,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
         results_path: str,
         metric_improvement_tolerance: float,
         max_non_improved_rounds: int,
-        lock_path: str = "lock.txt"
+        lock_path: str = "lock.txt",
     ) -> "BetaGausMixedDVAETrainer.TrainFoldEvalOutput":
         """
         Train one fold with periodic evaluation and simple convergence check.
@@ -692,6 +715,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 capacity_C=capacity_C,
                 device=device,
                 feat_type_dict=feat_type_dict,
+                train_mask=train_mask,
                 batch_size=batch_size,
             )
             completed_epochs += epochs_this_round
@@ -930,6 +954,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 amputation_mask,
             )
             training_input_np = split_output.training_input
+            training_mask = split_output.training_mask
             validation_input = split_output.validation_input
             validation_mask = split_output.validation_mask
             pre_val_amputation_mask = split_output.pre_val_amputation_mask
@@ -975,6 +1000,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 results_path=results_path,
                 metric_improvement_tolerance=metric_improvement_tolerance,
                 max_non_improved_rounds=max_non_improved_rounds,
+                train_mask=training_mask,
             )
             best_metric_val = fold_eval_output.best_metric_val
             selection_metric_name = fold_eval_output.selection_metric_name

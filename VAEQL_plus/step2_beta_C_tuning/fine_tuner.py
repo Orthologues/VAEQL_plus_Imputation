@@ -266,6 +266,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
 
         # Train on the other K-1 folds; reserve this held-out fold for validation scoring.
         train_data = X_in[train_indices]
+        train_source_mask = source_mask[train_indices]
         validation_base = X_in[val_indices]
         validation_ref = X_ref[val_indices]
         validation_source_mask = source_mask[val_indices]
@@ -278,6 +279,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
         fold_type4_counts.append(int(np.count_nonzero(view.validation_mask == 4)))
 
         train_tensor = torch.as_tensor(train_data, dtype=torch.float32)
+        train_mask = torch.as_tensor(train_source_mask, dtype=torch.int8)
         model = _new_model(X_in.shape[1], config, device)
         optimizer = (
             torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -305,6 +307,7 @@ def _candidate_cv_worker(job: Dict[str, Any]) -> Dict[str, Any]:
                 capacity_C=capacity_C,
                 device=device,
                 feat_type_dict=feat_type_dict,
+                train_mask=train_mask,
                 batch_size=batch_size,
                 starting_epoch=completed_epochs,
             )

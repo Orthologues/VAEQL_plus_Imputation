@@ -2,7 +2,7 @@
 ```text
 If I have a z-score scaled dataset, and I amputated some values artificially,
 and I fill in these values with 0 for the real-valued or count features, 1
-for the positive real-valued features, and 1/abs(N_categories) for the one-
+for the positive real-valued features, and 1/abs(N_categories) for the unary-encoded/one-
 hot encoded ordinal/categorical features, and I wanna train a VAE+Q Learning
 imputation model. In the cross validation pre-training phase of the VAE, I
 wanna freeze the weights associated with these amputated values. How should I

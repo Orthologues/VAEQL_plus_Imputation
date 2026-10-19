@@ -1,61 +1,71 @@
 \begin{algorithm}[ht]
 \footnotesize
-\captionof{algorithm}{\textbf{Feature-Type-Aware Data Preprocessing with Synthetic Amputation and Targeted Imputation}}
+\captionof{algorithm}{\textbf{Feature-Type-Specific Preprocessing with Synthetic Amputation and Placeholder Filling}}
 \label{algo:data_preprocessing}
 \begin{algorithmic}[1]
 
   \Require{ \\
     \begin{minipage}[t]{0.95\linewidth}
       \textbf{Input/config:} \\
-      $\boldsymbol{D}$\Comment{clinical-trial-based tabular input dataset} \\
-      $\boldsymbol{F}$ \Comment{feature schema from \texttt{VAEQL\_plus.conf.feat\_types}: real, positive-real, count, ordinal, binary, categorical} \\
-      missing mechanism $\mu \in \{\mathrm{MCAR},\mathrm{MAR},\mathrm{MNAR}\}$, missing rate $\rho$ \\
-      pre-imputation method $\pi \in \{\mathrm{MEAN},\mathrm{BAYESIANRIDGE},\mathrm{RANDOMFOREST},\mathrm{MICE}\}$ \\
-      optional backend flag (pandas/spark), and model-specific iteration budgets
+      $\mathcal D$ \Comment{clinical-trial-based tabular input dataset} \\
+      $\mathcal F$ \Comment{feature schema from \texttt{VAEQL\_plus.conf.feat\_types}: real, positive-real, count, ordinal, binary, categorical} \\
+      missing mechanism $\kappa \in \{\mathrm{MCAR},\mathrm{MAR},\mathrm{MNAR}\}$ and amputation rate $0<\rho\leq 0.5$ \\
+      optional backend flag (pandas/Spark)
     \end{minipage}
   }
+  \Ensure Model-input tensor $X_0$ and ordered feature specifications $\Phi$; missingness mask $M$ retained separately
   \Statex
 
-  \Procedure{\textit{PreprocessAndScaleData}}{$\mathcal{D}, \mathcal{F}, \mu, \rho, \pi$}
-    \State \textsc{ValidateInputColumns}$(\mathcal{D}, \mathcal{F}.\texttt{all\_feats})$
-    \State $X_{\text{real}} \gets$ \textsc{TransformRealValuedFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{real\_val\_feats})$ \Comment{z-score}
-    \State $X_{\text{pos}} \gets$ \textsc{TransformPositiveRealFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{pos\_real\_val\_feats})$ \Comment{Yeo--Johnson + standardize}
-    \State $X_{\text{count}} \gets$ \textsc{TransformCountFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{count\_feats})$ \Comment{$\log(1+x)$}
-    \State $(X_{\text{ord}}, G_{\text{ord}}) \gets$ \textsc{TransformOrdinalFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{ord\_feats})$ \Comment{unary encoding}
-    \State $(X_{\text{bi}}, G_{\text{bi}}) \gets$ \textsc{TransformBinaryFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{bi\_feats})$ \Comment{numeric $\{0,1\}$ or canonical labels}
-    \State $(X_{\text{cat}}, G_{\text{cat}}) \gets$ \textsc{TransformCategoricalFeatures}$(\mathcal{D}, \mathcal{F}.\texttt{cat\_feats})$ \Comment{one-hot, preserve source NaNs}
-    \State $X_{\text{pre}} \gets \textsc{ConcatenateInFamilyOrder}(X_{\text{real}}, X_{\text{pos}}, X_{\text{count}}, X_{\text{ord}}, X_{\text{bi}}, X_{\text{cat}})$
-    \State $(X_{\text{amp}}, M) \gets$ \textsc{ApplyPyampute}$(X_{\text{pre}}, G_{\text{ord}}, G_{\text{cat}}, \mu, \rho, \pi)$
-    \State $X_{\text{imp}} \gets$ \textsc{ImputeAmputedOnly}$(X_{\text{amp}}, M, \pi)$ \Comment{impute only mask value $2$}
-    \State $\{\Phi\} \gets$ \textsc{BuildOrderedFeatureSpecs}$(X_{\text{imp}}, G_{\text{ord}}, G_{\text{bi}}, G_{\text{cat}})$
-    \State \Return $(X_0, M_0, \{\Phi\}) \coloneqq (\textsc{TensorizeFloat32}(X_{\text{imp}}), M, \{\Phi\})$
+  \Procedure{\textit{Preprocess}}{$\mathcal D,\mathcal F,\kappa,\rho$}
+    \State \textsc{ValidateInputColumns}$(\mathcal D, \mathcal F.\texttt{all\_feats})$
+    \State $X_{\text{real}} \gets$ \textsc{TransformRealValuedFeatures}$(\mathcal D, \mathcal F.\texttt{real\_val\_feats})$ \Comment{standardize observed values; clip to $[-5,5]$}
+    \State $X_{\text{pos}} \gets$ \textsc{TransformPositiveRealFeatures}$(\mathcal D, \mathcal F.\texttt{pos\_real\_val\_feats})$ \Comment{apply Yeo--Johnson and standardize observed values; clip to $[-5,5]$}
+    \State $X_{\text{count}} \gets \operatorname{clip}_{[-5,5]}\!\left(\log\!\left(1+\max(\mathcal D_{\text{count}},0)\right)\right)$
+    \State $(X_{\text{ord}}, G_{\text{ord}}) \gets$ \textsc{TransformOrdinalFeatures}$(\mathcal D, \mathcal F.\texttt{ord\_feats})$ \Comment{unary encoding; one column per ordinal threshold}
+    \State $(X_{\text{bin}}, G_{\text{bin}}) \gets$ \textsc{TransformBinaryFeatures}$(\mathcal D, \mathcal F.\texttt{bi\_feats})$ \Comment{map numeric or canonical labels to $\{0,1\}$}
+    \State $(X_{\text{cat}}, G_{\text{cat}}) \gets$ \textsc{TransformCategoricalFeatures}$(\mathcal D, \mathcal F.\texttt{cat\_feats})$ \Comment{one-hot encode; preserve source missingness}
+    \State $X_{\text{pre}} \gets \textsc{ConcatenateInFamilyOrder}(X_{\text{real}}, X_{\text{pos}}, X_{\text{count}}, X_{\text{ord}}, X_{\text{bin}}, X_{\text{cat}})$
+    \State $\mathcal J_{\text{num}} \gets \operatorname{columns}(X_{\text{real}}) \cup \operatorname{columns}(X_{\text{pos}}) \cup \operatorname{columns}(X_{\text{count}})$
+    \State $\mathcal G \gets \{G_{\text{ord}}(f): f\in\mathcal F_{\text{ord}}\} \cup \{\{b\}: b\in\operatorname{columns}(X_{\text{bin}})\} \cup \{G_{\text{cat}}(c): c\in\mathcal F_{\text{cat}}\} \cup \{\{j\}:j\in\mathcal J_{\text{num}}\}$
+           \Comment{group ordinal/categorical columns; use binary/numeric singletons}
+    \State $(X_{\text{amp}}, M) \gets$ \textsc{ApplyPrefillAndPyAmpute}$(X_{\text{pre}}, \mathcal G, G_{\text{ord}}, G_{\text{bin}}, G_{\text{cat}}, \kappa, \rho)$
+    \State $X_{\text{filled}} \gets$ \textsc{FillAmputedPlaceholders}$(X_{\text{amp}}, M, G_{\text{ord}}, G_{\text{bin}}, G_{\text{cat}})$
+    \State $\Phi \gets$ \textsc{BuildOrderedFeatureSpecs}$(\operatorname{columns}(X_{\text{filled}}); \operatorname{columns}(X_{\text{real}}), \operatorname{columns}(X_{\text{pos}}), \operatorname{columns}(X_{\text{count}}), G_{\text{ord}}, \operatorname{columns}(X_{\text{bin}}), G_{\text{cat}})$
+           \Comment{numeric/binary singletons; ordinal/categorical groups}
+    \State $X_0 \gets X_{\text{filled}}$
+    \State \Return $(X_0, \Phi, M)$
   \EndProcedure
 
   \Statex
-  \Procedure{\textit{ApplyPyampute}}{$X_{\text{pre}}, G_{\text{ord}}, G_{\text{cat}}, \mu, \rho, \pi$}
-    \State $X_{\text{amp-input}} \gets \textsc{PreImputeForAmputation}(X_{\text{pre}}, \pi)$ \Comment{pyampute requires complete input}
-    \State $X_{\text{amp}} \gets X_{\text{amp-input}}$
-    \State Build grouped-variable map for ordinal and categorical expansions
-    \For{each column/group $v$ in $X_{\text{amp-input}}$}
-      \State Draw synthetic missingness with pattern $\{\texttt{incomplete\_vars}=v,\texttt{mechanism}=\mu\}$ and proportion $\rho$
-      \State Apply the sampled NaN pattern to corresponding columns in $X_{\text{amp}}$
+    \Procedure{\textit{ApplyPrefillAndPyAmpute}}{$X_{\text{pre}}, \mathcal G, G_{\text{ord}}, G_{\text{bin}}, G_{\text{cat}}, \kappa, \rho$}
+    \State $M' \gets \operatorname{isnan}(X_{\text{pre}})$ \Comment{record source missingness after feature transformation}
+    \State $\mathbf v_{\text{pre}} \gets \textsc{FeatureAwareMarginals}(X_{\text{pre}};M'=0,G_{\text{ord}},G_{\text{bin}},G_{\text{cat}})$
+           \Comment{numeric medians; binary prevalence; ordinal threshold rates; categorical proportions}
+    \State $\widetilde X_{\text{pre}} \gets \textsc{FillSourceMissing}(X_{\text{pre}},\mathbf v_{\text{pre}})$
+           \Comment{complete input required by Pyampute}
+    \State $X_{\text{amp}} \gets \widetilde X_{\text{pre}}$
+    \For{each group $g\in\mathcal G$}
+      \State $Y \gets \textsc{Pyampute}(\widetilde X_{\text{pre}};\ \texttt{incomplete\_vars}=g,\ \texttt{mechanism}=\kappa,\ \texttt{prop}=\rho)$
+      \State $(X_{\text{amp}})_{:,g} \gets Y_{:,g}$
     \EndFor
-    \State Build mask $M$ with semantics: $0$ observed, $1$ pre-existing NaN, $2$ newly amputed
+    \State $\widetilde M \gets \operatorname{isnan}(X_{\text{amp}})$
+    \State $M \gets 0$; set $M[M']\gets 1$ and $M[\widetilde M\land\neg M']\gets 2$
+           \Comment{$1$: source-missing; $2$: newly amputed}
     \State \Return $(X_{\text{amp}}, M)$
   \EndProcedure
 
   \Statex
-  \Procedure{\textit{ImputeAmputedOnly}}{$X_{\text{amp}}, M, \pi$}
+  \Procedure{\textit{FillAmputedPlaceholders}}{$X_{\text{amp}}, M, G_{\text{ord}}, G_{\text{bin}}, G_{\text{cat}}$}
     \State $\Omega_2 \gets \{(i,j)\mid M_{ij}=2\}$
+           \Comment{fill newly amputed cells only}
     \If{$\Omega_2=\varnothing$}
       \State \Return $X_{\text{amp}}$
     \EndIf
-    \If{$\pi=\mathrm{MEAN}$}
-      \State Fill only $\Omega_2$ by row-wise means (fallback $0$ when undefined)
-    \Else
-      \State Fit selected iterative imputer on full matrix and overwrite only $\Omega_2$
-    \EndIf
-    \State \Return imputed matrix
+    \State $\mathbf v_0 \gets \textsc{FeatureAwareMarginals}(X_{\text{amp}};M=0,G_{\text{ord}},G_{\text{bin}},G_{\text{cat}})$
+           \Comment{estimate feature-wise placeholders from type-0 cells}
+    \State $X_{\text{filled}} \gets X_{\text{amp}}$
+    \State $(X_{\text{filled}})_{ij} \gets v_{0,j}\quad\forall(i,j)\in\Omega_2$
+    \State \Return $X_{\text{filled}}$
   \EndProcedure
 
 \end{algorithmic}

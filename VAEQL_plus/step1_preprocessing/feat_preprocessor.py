@@ -18,7 +18,7 @@
 # - Ordinal features: Ordinal logit-model (unary encoding, then monotone cumulative logits in $\beta$-DVAE reconstruction)
 #   reconstructed with grouped threshold-wise binary losses after the softplus-gap ordered-logit transform;
 #   this enforces monotone cumulative probabilities for feat-ge_* columns.
-# - Binary features: Bernoulli distribution (numeric-coded binaries stay in [0, 1], string-coded binaries keep canonical labels; no logit transform in preprocessing, then applied with Sigmoid activation)
+# - Binary features: Bernoulli distribution (numeric-coded values stay in {0, 1}; string categories map to canonical {0, 1} codes)
 # - Categorical features: Categorical distribution (one-hot encoding, pre-activated transform as logits, then applied with Gumbel-Softmax activation to add more stochasticity compared to Vanilla-Softmax)
 #########################################################
 
@@ -26,8 +26,6 @@
 from __future__ import annotations
 
 
-import os
-import re
 from collections import namedtuple
 from typing import TYPE_CHECKING, Dict, FrozenSet, List, Sequence, Set, Tuple, Union
 
@@ -36,10 +34,6 @@ import pandas as pd
 import torch
 from pandas import DataFrame
 from pyampute.ampute import MultivariateAmputation
-from sklearn.experimental import enable_iterative_imputer  # noqa: F401
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.impute import IterativeImputer
-from sklearn.linear_model import BayesianRidge
 from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScaler
 from torch import Tensor
 
@@ -61,10 +55,6 @@ class FeaturePreprocessor:
         missing_rate: float,
         input_df: Union[DataFrame, SparkDataFrame] = None,
         use_spark: bool = False,
-        pre_imputation_method: str = "Mean",
-        pre_imputation_max_iter: int = 5,
-        mice_num_imputations: int = 5,
-        random_forest_n_estimators: int = 100,
     ):
         self.feat_dict = feat_dict
         self.use_spark = use_spark
@@ -101,42 +91,11 @@ class FeaturePreprocessor:
         
         self.ordered_feats_info_tuple: Tuple[OrderedFeature, ...] = tuple()
         self.missingness_mask: np.ndarray | None = None
-        
-        # pre-imputation parameters (three in total) in the following code snippets
-        normalized_imputation_method = re.sub(r"[-_\.\s]+", "", str(pre_imputation_method).upper())
-        # Descriptions of the methods:
-        # - MEAN: naive univariate single imputation
-        # - BAYESIANRIDGE: deterministic multivariate single imputation with a linear model, which can capture feature correlations better than mean imputation, but may be less flexible than a non-linear model and can be sensitive to outliers.
-        # - RANDOMFOREST: deterministic (reproducible) multivariate single imputation with a non-linear model, which can be more flexible and accurate than the linear BayesianRidge, but also more computationally expensive.
-        # - MICE: stochastic multivariate multiple imputation by chained equations with BayesianRidge as the base estimator, stochastic by sampling from the posterior; final imputed values are aggregated by averaging across multiple imputations to stabilize the randomness.
-        VALID_IMPUTATION_METHODS = {"MEAN", "BAYESIANRIDGE", "RANDOMFOREST", "MICE"}
-        if normalized_imputation_method not in VALID_IMPUTATION_METHODS:
-            raise ValueError(
-                "pre_imputation_method must be one of "
-                f"{sorted(VALID_IMPUTATION_METHODS)!r}, got {pre_imputation_method!r}"
-            )
-        self.pre_imputation_method = normalized_imputation_method
-        
-        if not (1 <= int(pre_imputation_max_iter) <= 20):
-            raise ValueError(
-                f"pre_imputation_max_iter must satisfy 1 <= value <= 20, got {pre_imputation_max_iter!r}"
-            )
-        self.pre_imputation_max_iter = int(pre_imputation_max_iter)
-        
-        if not (2 <= int(mice_num_imputations) <= 20):
-            raise ValueError(
-                f"mice_num_imputations must satisfy 2 <= value <= 20, got {mice_num_imputations!r}"
-            )
-        self.mice_num_imputations = int(mice_num_imputations)
-        if int(random_forest_n_estimators) < 10:
-            raise ValueError(
-                f"random_forest_n_estimators must be >= 10, got {random_forest_n_estimators!r}"
-            )
-        self.random_forest_n_estimators = int(random_forest_n_estimators)
-        self.random_forest_n_jobs = max(1, (os.cpu_count() or 1) - 2)
 
     # =========================================================================
-    # Main entry point for preprocessing: validates columns, applies transformations, applies pyampute for synthetic amputation, imputes the amputed values, and returns the final preprocessed tensor and ordered feature specifications.
+    # Main entry point: transforms features, applies synthetic amputation,
+    # fills masked entries with provisional placeholders, and returns the tensor,
+    # missingness mask, and ordered feature specifications.
     # =========================================================================
     def preprocess(self) -> Tuple[Tensor, Tuple[OrderedFeature, ...]]:
         self._validate_columns()
@@ -146,18 +105,23 @@ class FeaturePreprocessor:
         pre_df, real_cols, pos_cols, count_cols, ord_groups, bi_groups, cat_groups = self._build_preprocessed_dataframe()
 
         # ampute with pyampute and generate missingness mask
-        amputed_df, mask = self._apply_pyampute(
+        amputed_df, mask = self._apply_prefill_and_pyampute(
             pre_df,
             ord_groups,
+            bi_groups,
             cat_groups,
         )
-
-        # Step that uses the same options as VALID_IMPUTATION_METHODS.
-        imputed_df = self._impute_amputed_values(amputed_df, mask)
-
-        x = imputed_df.to_numpy(dtype=np.float32, copy=True)
+        # Fill only newly amputed cells with fast, feature-aware marginals.
+        model_input_df = self._fill_amputed_placeholders(
+            amputed_df,
+            mask,
+            ord_groups,
+            bi_groups,
+            cat_groups,
+        )
+        x = model_input_df.to_numpy(dtype=np.float32, copy=True)
         self.ordered_feats_info_tuple = self._build_ordered_feature_ordered_feats(
-            ordered_cols=list(imputed_df.columns),
+            ordered_cols=list(model_input_df.columns),
             real_cols=real_cols,
             pos_cols=pos_cols,
             count_cols=count_cols,
@@ -327,8 +291,8 @@ class FeaturePreprocessor:
     # Distribution: Bernoulli (binary features)
     # Transform stage here: explicit branch by observed data representation.
     # - Numeric-coded binaries map to {0, 1}
-    # - String-coded binaries map to canonical declared labels
-    # No logit transform is applied in preprocessing. Sigmoid as the activation function.
+    # - String-coded binaries map their sorted canonical labels to {0, 1}
+    # This keeps the preprocessed matrix numeric for amputation and tensorization.
     def _transform_binary(self, bi_feats: Dict[str, Set[str]], spark: bool = False) -> Tuple[DataFrame, Dict[str, List[str]]]:
         cols = sorted(bi_feats.keys())
         if spark:
@@ -360,14 +324,10 @@ class FeaturePreprocessor:
                 if not valid_numeric_mask.all():
                     raise ValueError(f"Binary feature '{col}' numeric branch produced non-binary outputs.")
             else:
-                mapped_col = pd.Series(pd.NA, index=series.index, dtype="string")
+                mapped_col = pd.Series(np.nan, index=series.index, dtype=np.float32)
                 norm_str = series.astype("string").str.strip().str.lower()
-                mapped_col.loc[norm_str == zero_label] = zero_label
-                mapped_col.loc[norm_str == one_label] = one_label
-                # Guarantee string branch outputs only {zero_label, one_label, NA}.
-                valid_string_mask = mapped_col.isna() | mapped_col.isin({zero_label, one_label})
-                if not valid_string_mask.all():
-                    raise ValueError(f"Binary feature '{col}' string branch produced non-binary outputs.")
+                mapped_col.loc[norm_str == zero_label] = 0.0
+                mapped_col.loc[norm_str == one_label] = 1.0
 
             unknown_mask = series.notna() & mapped_col.isna()
             if unknown_mask.any():
@@ -418,70 +378,137 @@ class FeaturePreprocessor:
         return out_df, groups
 
     # =========================================================================
-    # Amputation + Pre-imputation helpers
+    # Amputation + feature-aware placeholder helpers
     # =========================================================================
-    def _apply_pyampute(
+    @staticmethod
+    def _compute_placeholder_values(
+        data_df: DataFrame,
+        available_mask: np.ndarray,
+        ord_groups: Dict[str, List[str]],
+        bi_groups: Dict[str, List[str]],
+        cat_groups: Dict[str, List[str]],
+    ) -> np.ndarray:
+        """Estimate fast marginal placeholders from available transformed values.
+
+        Scalar numeric features use their median, binary features use their
+        prevalence, ordinal groups use cumulative-threshold prevalences, and
+        categorical groups use normalized one-hot frequencies.
+        """
+        try:
+            values = data_df.to_numpy(dtype=np.float64, na_value=np.nan)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Feature-aware placeholder filling requires numeric columns.") from exc
+
+        available = np.asarray(available_mask, dtype=bool).copy()
+        if available.shape != values.shape:
+            raise ValueError(
+                "Placeholder availability mask must match the preprocessed matrix; "
+                f"got {available.shape} and {values.shape}."
+            )
+        available &= np.isfinite(values)
+
+        column_indices = {str(column): idx for idx, column in enumerate(data_df.columns)}
+        placeholders = np.zeros(values.shape[1], dtype=np.float64)
+        encoded_indices: set[int] = set()
+
+        def indices_for_group(feature: str, columns: Sequence[str]) -> List[int]:
+            missing = [column for column in columns if str(column) not in column_indices]
+            if missing:
+                raise KeyError(
+                    f"Encoded columns for feature {feature!r} are missing: {missing}."
+                )
+            return [column_indices[str(column)] for column in columns]
+
+        for feature, group_columns in ord_groups.items():
+            indices = indices_for_group(feature, group_columns)
+            encoded_indices.update(indices)
+            group_values = values[:, indices]
+            complete_rows = available[:, indices].all(axis=1)
+            if complete_rows.any():
+                rates = np.mean(group_values[complete_rows], axis=0)
+            else:
+                # Uniform probability over ordinal levels, represented as
+                # cumulative probabilities for the unary thresholds.
+                n_levels = len(indices) + 1
+                # Example: with 4 levels and no complete observations, the deterministic fallback
+                # for thresholds 'ge_1', 'ge_2', and 'ge_3' is [0.75, 0.50, 0.25].
+                rates = (n_levels - np.arange(1, n_levels, dtype=np.float64)) / n_levels
+            rates = np.clip(rates, 0.0, 1.0)
+            placeholders[indices] = rates
+
+        for feature, group_columns in cat_groups.items():
+            indices = indices_for_group(feature, group_columns)
+            encoded_indices.update(indices)
+            group_values = values[:, indices]
+            complete_rows = available[:, indices].all(axis=1)
+            valid_one_hot_rows = (
+                complete_rows
+                & np.isclose(group_values.sum(axis=1), 1.0)
+                & np.all((group_values >= 0.0) & (group_values <= 1.0), axis=1)
+            )
+            if valid_one_hot_rows.any():
+                proportions = np.clip(
+                    np.mean(group_values[valid_one_hot_rows], axis=0),
+                    0.0,
+                    1.0,
+                )
+            else:
+                # If no valid complete one-hot rows are available, use a uniform fallback.
+                proportions = np.full(len(indices), 1.0 / len(indices))
+            placeholders[indices] = proportions
+
+        ## CHECKPOINT
+        for feature in bi_groups:
+            indices = indices_for_group(feature, [feature])
+            idx = indices[0]
+            encoded_indices.add(idx)
+            observed_binary = values[available[:, idx], idx]
+            if observed_binary.size:
+                placeholders[idx] = float(np.clip(np.mean(observed_binary), 0.0, 1.0))
+            else:
+                placeholders[idx] = 0.5
+
+        for idx in range(values.shape[1]):
+            if idx in encoded_indices:
+                continue
+            observed_numeric = values[available[:, idx], idx]
+            placeholders[idx] = (
+                float(np.median(observed_numeric)) if observed_numeric.size else 0.0
+            )
+
+        return placeholders.astype(np.float32)
+
+    # uses the method `_compute_placeholder_values` to populate type-1 values
+    def _apply_prefill_and_pyampute(
         self,
         pre_df: DataFrame,
         ord_groups: Dict[str, List[str]],
+        bi_groups: Dict[str, List[str]],
         cat_groups: Dict[str, List[str]],
     ) -> Tuple[DataFrame, np.ndarray]:
-        # pyampute expects complete input; fill pre-existing NaN column-wise before synthetic amputation.
-        pyamp_input_df = pre_df.copy()
-        method = self.pre_imputation_method
-
-        if method == "MEAN":
-            # use mean imputation when possible and zero otherwise, for the unobserved values at each feature
-            for col in pyamp_input_df.columns:
-                series = pyamp_input_df[col]
-                naive_na_imputation = float(series.mean()) if series.notna().any() else 0.0
-                pyamp_input_df[col] = series.fillna(naive_na_imputation)
-        else:
-            if method == "BAYESIANRIDGE":
-                estimator = BayesianRidge()
-                imputer = IterativeImputer(
-                    estimator=estimator,
-                    random_state=42,
-                    max_iter=self.pre_imputation_max_iter,
-                    sample_posterior=False,
-                    keep_empty_features=True,
-                )
-                imputed_arr = imputer.fit_transform(pyamp_input_df)
-            elif method == "RANDOMFOREST":
-                estimator = RandomForestRegressor(
-                    n_estimators=self.random_forest_n_estimators,
-                    random_state=42,
-                    n_jobs=self.random_forest_n_jobs,
-                )
-                imputer = IterativeImputer(
-                    estimator=estimator,
-                    random_state=42,
-                    max_iter=self.pre_imputation_max_iter,
-                    sample_posterior=False,
-                    keep_empty_features=True,
-                )
-                imputed_arr = imputer.fit_transform(pyamp_input_df)
-            elif method == "MICE":
-                # Multiple-imputation MICE: sample posterior multiple times and aggregate.
-                mice_imputations: List[np.ndarray] = []
-                for k in range(self.mice_num_imputations):
-                    estimator = BayesianRidge()
-                    imputer = IterativeImputer(
-                        estimator=estimator,
-                        random_state=42 + k,
-                        max_iter=self.pre_imputation_max_iter,
-                        sample_posterior=True,
-                        keep_empty_features=True,
-                    )
-                    mice_imputations.append(imputer.fit_transform(pyamp_input_df))
-                imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
-            else:
-                raise ValueError(f"Unsupported pre-imputation method at runtime: {method}")
-            pyamp_input_df = pd.DataFrame(
-                imputed_arr,
-                columns=pyamp_input_df.columns,
-                index=pyamp_input_df.index,
-            )
+        # Pyampute requires complete numeric input. Use type-aware marginal
+        # placeholders for source-missing entries rather than fitting imputers.
+        pyamp_values = pre_df.to_numpy(dtype=np.float64, na_value=np.nan)
+        infinite_values = np.isinf(pyamp_values)
+        if infinite_values.any():
+            raise ValueError("Preprocessed feature values must be finite or missing.")
+        source_missing = np.isnan(pyamp_values)
+        placeholder_values = self._compute_placeholder_values(
+            pre_df,
+            ~source_missing,
+            ord_groups,
+            bi_groups,
+            cat_groups,
+        )
+        pyamp_values[source_missing] = np.broadcast_to(
+            placeholder_values,
+            pyamp_values.shape,
+        )[source_missing]
+        pyamp_input_df = pd.DataFrame(
+            pyamp_values,
+            columns=pre_df.columns,
+            index=pre_df.index,
+        )
 
         amputed_df = pyamp_input_df.copy()
 
@@ -530,71 +557,47 @@ class FeaturePreprocessor:
         mask = np.zeros(preexisting_nan_mask.shape, dtype=np.int8)
         mask[preexisting_nan_mask] = 1
         mask[amputed_nan_mask & ~preexisting_nan_mask] = 2
+        # Restore type-1 cells in case Pyampute selected an already prefilled cell.
+        amputed_values = amputed_df.to_numpy(dtype=np.float32, na_value=np.nan, copy=True)
+        source_placeholder_values = np.broadcast_to(
+            placeholder_values,
+            amputed_values.shape,
+        )
+        source_mask = mask == 1
+        amputed_values[source_mask] = source_placeholder_values[source_mask]
+        amputed_df = pd.DataFrame(
+            amputed_values,
+            columns=amputed_df.columns,
+            index=amputed_df.index,
+        )
         return amputed_df, mask
 
-    # Post-pyampute imputation for the amputed values only, using the same method as specified in self.pre_imputation_method
-    def _impute_amputed_values(self, amputed_df: DataFrame, mask: np.ndarray) -> DataFrame:
-        # mask semantics:
-        # 0 = observed after amputation
-        # 1 = pre-existing NaN values in pre_df
-        # 2 = newly amputed values from pyampute
-        amputed_only_mask = (mask == 2)
+    # uses the method `_compute_placeholder_values` to populate type-2 values
+    def _fill_amputed_placeholders(
+        self,
+        amputed_df: DataFrame,
+        mask: np.ndarray,
+        ord_groups: Dict[str, List[str]],
+        bi_groups: Dict[str, List[str]],
+        cat_groups: Dict[str, List[str]],
+    ) -> DataFrame:
+        """Fill newly amputed cells using marginals from type-0 cells only."""
+        amputed_only_mask = np.asarray(mask) == 2
         if not amputed_only_mask.any():
             return amputed_df.copy()
 
-        method = self.pre_imputation_method
-        arr = amputed_df.to_numpy(dtype=np.float32, copy=True)
-
-        if method == "MEAN":
-            row_means = np.nanmean(arr, axis=1)
-            row_means = np.where(np.isnan(row_means), 0.0, row_means)
-            amp_r, amp_c = np.where(amputed_only_mask)
-            arr[amp_r, amp_c] = row_means[amp_r]
-            return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
-
-        # Iterative models impute from NaNs in the full matrix.
-        if method == "BAYESIANRIDGE":
-            estimator = BayesianRidge()
-            imputer = IterativeImputer(
-                estimator=estimator,
-                random_state=42,
-                max_iter=self.pre_imputation_max_iter,
-                sample_posterior=False,
-                keep_empty_features=True,
-            )
-            imputed_arr = imputer.fit_transform(arr)
-        elif method == "RANDOMFOREST":
-            estimator = RandomForestRegressor(
-                n_estimators=self.random_forest_n_estimators,
-                random_state=42,
-                n_jobs=self.random_forest_n_jobs,
-            )
-            imputer = IterativeImputer(
-                estimator=estimator,
-                random_state=42,
-                max_iter=self.pre_imputation_max_iter,
-                sample_posterior=False,
-                keep_empty_features=True,
-            )
-            imputed_arr = imputer.fit_transform(arr)
-        elif method == "MICE":
-            # Multiple-imputation MICE: sample posterior multiple times and aggregate.
-            mice_imputations: List[np.ndarray] = []
-            for k in range(self.mice_num_imputations):
-                estimator = BayesianRidge()
-                imputer = IterativeImputer(
-                    estimator=estimator,
-                    random_state=42 + k,
-                    max_iter=self.pre_imputation_max_iter,
-                    sample_posterior=True,
-                    keep_empty_features=True,
-                )
-                mice_imputations.append(imputer.fit_transform(arr))
-            imputed_arr = np.mean(np.stack(mice_imputations, axis=0), axis=0)
-        else:
-            raise ValueError(f"Unsupported imputation method at runtime: {method}")
-        arr[amputed_only_mask] = imputed_arr[amputed_only_mask]
-        return pd.DataFrame(arr, columns=amputed_df.columns, index=amputed_df.index)
+        observed_mask = np.asarray(mask) == 0
+        placeholder_values = self._compute_placeholder_values(
+            amputed_df,
+            observed_mask,
+            ord_groups,
+            bi_groups,
+            cat_groups,
+        )
+        values = amputed_df.to_numpy(dtype=np.float32, na_value=np.nan, copy=True)
+        broadcast_placeholders = np.broadcast_to(placeholder_values, values.shape)
+        values[amputed_only_mask] = broadcast_placeholders[amputed_only_mask]
+        return pd.DataFrame(values, columns=amputed_df.columns, index=amputed_df.index)
 
     # =========================================================================
     # Structural helpers

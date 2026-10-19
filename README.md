@@ -13,6 +13,9 @@ future medical-related CS/ML conference publication.
 - type-aware preprocessing for continuous, positive-continuous, count, binary,
   categorical, and ordinal features;
 - a Gaussian-mixture disentangled $\beta$-VAE core;
+- mask-conditioned encoder and decoder inspired by [Collier, Nazabal, and
+  Williams, *VAEs in the Presence of Missing Data*](https://arxiv.org/pdf/2006.05301);
+  the GMM prior and $\beta$-capacity objective remain specific to this project;
 - grouped reconstruction losses for expanded categorical and ordinal features;
 - monotone cumulative ordinal reconstruction logits;
 - a preliminary two-phase AWS Batch workflow: Ministral 8B annotation on GPU,

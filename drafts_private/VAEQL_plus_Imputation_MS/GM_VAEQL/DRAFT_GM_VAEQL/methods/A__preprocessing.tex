@@ -65,7 +65,7 @@
          \Comment{record source missingness after feature transformation}
   \State $\mathbf v_{\mathrm{pre}}\gets
          \textsc{FeatureAwareMarginals}(P;M'=0,G_{\mathrm{ord}},G_{\mathrm{bin}},G_{\mathrm{cat}})$
-         \Comment{using: numeric medians; binary prevalence; ordinal threshold rates; categorical proportions}
+         \Comment{numeric medians; binary prevalence; ordinal threshold rates; categorical proportions}
   \State $\widetilde P\gets\textsc{FillSourceMissing}(P,\mathbf v_{\mathrm{pre}})$
          \Comment{complete input required by Pyampute}
   \State $A\gets\widetilde P$
@@ -85,13 +85,13 @@
 \Statex
 \Procedure{FillAmputedPlaceholders}{$A,M,G_{\mathrm{ord}},G_{\mathrm{bin}},G_{\mathrm{cat}}$}
   \State $\Omega_2\gets\{(i,j):M_{ij}=2\}$
-         \Comment{fill newly amputed cells only; retain source-missing placeholders}
+         \Comment{fill newly amputed cells only}
   \If{$\Omega_2=\varnothing$}
     \State \Return $A$
   \EndIf
   \State $\mathbf v_0\gets
          \textsc{FeatureAwareMarginals}(A;M=0,G_{\mathrm{ord}},G_{\mathrm{bin}},G_{\mathrm{cat}})$
-         \Comment{using: numeric medians; binary prevalence; ordinal threshold rates; categorical proportions}
+         \Comment{estimate feature-wise placeholders from type-0 cells}
   \State $A_{\mathrm{filled}}\gets A$
   \State $(A_{\mathrm{filled}})_{ij}\gets v_{0,j}
          \quad\forall(i,j)\in\Omega_2$
