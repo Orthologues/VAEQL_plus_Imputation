@@ -126,15 +126,19 @@ class BetaGausMixedDVAE(nn.Module):
             "gmm_encoder": gmm_encoder,
         })
 
-        # Condition the decoder on the same observed indicator.
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim + input_dim, hidden_dim2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim2, hidden_dim1),
-            nn.ReLU(),
-            nn.Linear(hidden_dim1, input_dim),
-            # decoder outputs real-valued reconstructions in the preprocessed feature space
-        )
+        # Condition a decoder hidden layer on the observed indicator.
+        self.decoder = nn.ModuleDict({
+            "latent_trunk": nn.Sequential(
+                nn.Linear(latent_dim, hidden_dim2),
+                nn.ReLU(),
+            ),
+            "mask_fusion": nn.Sequential(
+                nn.Linear(hidden_dim2 + input_dim, hidden_dim1),
+                nn.ReLU(),
+                nn.Linear(hidden_dim1, input_dim),
+                # decoder outputs real-valued reconstructions in the preprocessed feature space
+            ),
+        })
 
         # GMM prior:
         # $p(z)=\sum_{k=1}^{K}\pi_k\,\mathcal{N}\!\left(z\mid\mu_k,\operatorname{diag}(\sigma_k^2)\right)$
@@ -181,7 +185,7 @@ class BetaGausMixedDVAE(nn.Module):
         )
 
     def _observed_indicator(self, X_mask: ArrayLike, reference: torch.Tensor) -> torch.Tensor:
-        """Map the repository's mask (0=observed) to the paper's indicator (1=observed)."""
+        """Map the repository's mask (0=observed) to the paper's (https://arxiv.org/pdf/2006.05301) indicator (1=observed)."""
         mask_t = torch.as_tensor(X_mask, device=reference.device)
         expected_shape = (reference.shape[0], self.input_dim)
         if tuple(mask_t.shape) != expected_shape:
@@ -273,9 +277,10 @@ class BetaGausMixedDVAE(nn.Module):
 
     # Decoding and Reconstruction
     def decode(self, posterior_z: torch.Tensor, X_mask: ArrayLike) -> torch.Tensor:
-        """Decode latent samples conditional on the observed indicator."""
+        """Condition latent decoder features on the observed indicator."""
         observed = self._observed_indicator(X_mask, posterior_z)
-        return self.decoder(torch.cat((posterior_z, observed), dim=1))
+        latent_features = self.decoder["latent_trunk"](posterior_z)
+        return self.decoder["mask_fusion"](torch.cat((latent_features, observed), dim=1))
 
     @staticmethod
     def _ordered_ordinal_logits(ordinal_raw: torch.Tensor) -> torch.Tensor:

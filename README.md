@@ -13,8 +13,10 @@ future medical-related CS/ML conference publication.
 - type-aware preprocessing for continuous, positive-continuous, count, binary,
   categorical, and ordinal features;
 - a Gaussian-mixture disentangled $\beta$-VAE core;
-- mask-conditioned encoder and decoder inspired by [Collier, Nazabal, and
-  Williams, *VAEs in the Presence of Missing Data*](https://arxiv.org/pdf/2006.05301);
+- mask-conditioned encoder and decoder inspired by the ED Ind. variant of
+  [Collier, Nazabal, and Williams, *VAEs in the Presence of Missing Data*](https://arxiv.org/pdf/2006.05301):
+  the encoder concatenates feature-aware filled data with the observed-value indicator,
+  and the decoder concatenates that indicator with a hidden representation computed from $z$;
   the GMM prior and $\beta$-capacity objective remain specific to this project;
 - grouped reconstruction losses for expanded categorical and ordinal features;
 - monotone cumulative ordinal reconstruction logits;

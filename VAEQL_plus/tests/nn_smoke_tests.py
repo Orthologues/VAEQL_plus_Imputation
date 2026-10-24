@@ -248,22 +248,49 @@ def test_encoder_and_decoder_condition_on_observed_mask() -> None:
     x = _build_toy_batch()
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
     observed_mask = torch.zeros_like(x, dtype=torch.int8)
-    source_missing_mask = torch.ones_like(x, dtype=torch.int8)
-    amputed_mask = torch.full_like(observed_mask, 2)
+    mixed_mask = torch.zeros_like(x, dtype=torch.int8)
+    n_source_missing = round(0.10 * x.numel())
+    n_amputed = round(0.20 * x.numel())
+    cell_order = torch.randperm(
+        x.numel(),
+        generator=torch.Generator().manual_seed(NN_SMOKE_TEST_SEED),
+    )
+    flat_mask = mixed_mask.view(-1)
+    flat_mask[cell_order[:n_source_missing]] = 1
+    flat_mask[cell_order[n_source_missing : n_source_missing + n_amputed]] = 2
+
+    assert torch.count_nonzero(mixed_mask == 1).item() == n_source_missing
+    assert torch.count_nonzero(mixed_mask == 2).item() == n_amputed
+    missing_cells = mixed_mask != 0
+    source_missing_mask = missing_cells.to(dtype=torch.int8)
+    amputed_mask = 2 * source_missing_mask
 
     observed_encoding = model.encode(x, observed_mask)
-    missing_encoding = model.encode(x, source_missing_mask)
-    assert not torch.equal(observed_encoding.posterior_k_logits, missing_encoding.posterior_k_logits)
+    mixed_encoding = model.encode(x, mixed_mask)
+    source_missing_encoding = model.encode(x, source_missing_mask)
+    amputed_encoding = model.encode(x, amputed_mask)
+    assert not torch.equal(
+        observed_encoding.posterior_k_logits,
+        mixed_encoding.posterior_k_logits,
+    )
+    # Source-missing and newly amputed cells both map to an unobserved indicator.
     torch.testing.assert_close(
-        missing_encoding.posterior_k_logits,
-        model.encode(x, amputed_mask).posterior_k_logits,
+        mixed_encoding.posterior_k_logits,
+        source_missing_encoding.posterior_k_logits,
+    )
+    torch.testing.assert_close(
+        source_missing_encoding.posterior_k_logits,
+        amputed_encoding.posterior_k_logits,
     )
 
     z = torch.ones(x.shape[0], model.z_dim)
     observed_reconstruction = model.decode(z, observed_mask)
-    missing_reconstruction = model.decode(z, source_missing_mask)
-    assert not torch.equal(observed_reconstruction, missing_reconstruction)
-    torch.testing.assert_close(missing_reconstruction, model.decode(z, amputed_mask))
+    mixed_reconstruction = model.decode(z, mixed_mask)
+    source_missing_reconstruction = model.decode(z, source_missing_mask)
+    amputed_reconstruction = model.decode(z, amputed_mask)
+    assert not torch.equal(observed_reconstruction, mixed_reconstruction)
+    torch.testing.assert_close(mixed_reconstruction, source_missing_reconstruction)
+    torch.testing.assert_close(source_missing_reconstruction, amputed_reconstruction)
 
     with pytest.raises(ValueError, match="X_mask"):
         model(x, observed_mask[:, :-1])
