@@ -10,7 +10,8 @@
 # - Real-valued features: Gaussian-style transformed-space reconstruction (Z-score scaling mean and std estimated from observed data)
 # - Positive real-valued features: Yeo-Johnson transform, then Z-score scaling
 #   this is not an explicit log-normal decoder likelihood.
-# - Count features: nonnegative count-valued variables transformed with log1p and clipping
+# - Count features: nonnegative count-valued variables transformed with log1p,
+#   z-score standardization, and clipping
 #   this is not an explicit Poisson decoder likelihood.
 #   Clinical count variables can be overdispersed, zero-inflated, outlier-prone,
 #   bounded by study design, or administratively coded, so we do not assume a
@@ -242,7 +243,7 @@ class FeaturePreprocessor:
         return out_df, list(cols)
 
     # Count features: transformed-space count handling, not a Poisson likelihood.
-    # Transform stage here: log1p transform with clipping to [-5, 5].
+    # Transform stage here: log1p, z-score on observed values, then clip to [-5, 5].
     def _transform_count(self, cols: Sequence[str], spark: bool = False) -> Tuple[DataFrame, List[str]]:
         if spark:
             from pyspark.sql import functions as F
@@ -253,7 +254,16 @@ class FeaturePreprocessor:
         else:
             pre_df = self.input_df.loc[:, list(cols)].apply(pd.to_numeric, errors="coerce").clip(lower=0)
         transformed = np.log1p(pre_df).astype(np.float32)
-        transformed = transformed.clip(lower=-5.0, upper=5.0)
+        for col in cols:
+            series = transformed[col]
+            observed_mask = series.notna()
+            if observed_mask.any():
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                scaled_values = scaler.fit_transform(
+                    series.loc[observed_mask].to_numpy().reshape(-1, 1)
+                ).reshape(-1).astype(np.float32)
+                series.loc[observed_mask] = np.clip(scaled_values, -5.0, 5.0)
+            transformed[col] = series
         return transformed, list(cols)
 
     # Ordinal features: unary encoding (K-1 thresholds).

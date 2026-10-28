@@ -1,8 +1,8 @@
-"""Train the selected GMM beta-VAE and generate initial Step 3 imputations.
+"""Train the selected GMM beta-VAE and generate an initial Step 3 imputation.
 
 This prototype consumes the Step 1 preprocessing bundle and the selected
 beta/C pair from Step 2. It deliberately stops before Q-learning; the trained
-model, source mask, operational imputation mask, and draws are the handoff.
+model, source mask, and feature-aware aggregate are the handoff.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from typing import Any, Dict, NamedTuple, Tuple
 import numpy as np
 import torch
 
-from VAEQL_plus.beta_DVAE.lightning_mod import BetaGausMixedDVAETrainer
 from VAEQL_plus.beta_DVAE.torch_nn import BetaGausMixedDVAE
 from VAEQL_plus.conf.config import (
     CV_BETA_C_TUNING_PARAMS_PATH,
@@ -24,7 +23,6 @@ from VAEQL_plus.conf.config import (
 )
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 from VAEQL_plus.step1_preprocessing.feat_preprocessor import OrderedFeature
-from VAEQL_plus.step2_beta_C_tuning.fine_tuner import build_cv_matrices
 
 
 class Step3Inputs(NamedTuple):
@@ -46,6 +44,8 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def load_step3_inputs(preprocessed_dir: Path) -> Step3Inputs:
     """Reuse Step 2's validated Step 1-bundle loader to preserve column alignment."""
+    from VAEQL_plus.step2_beta_C_tuning.fine_tuner import build_cv_matrices
+
     _, X0, source_mask, feature_specs, feature_dict = build_cv_matrices(
         preprocessed_dir=preprocessed_dir,
     )
@@ -88,6 +88,8 @@ def train_final_model(
     device: torch.device,
 ) -> tuple[BetaGausMixedDVAE, Dict[str, float]]:
     """Train a fresh GMM beta-VAE on the full Step 1 model-input matrix."""
+    from VAEQL_plus.beta_DVAE.lightning_mod import BetaGausMixedDVAETrainer
+
     model_config = {
         "input_dim": int(X0.shape[1]),
         "latent_dim": int(train_config["vae_cont_lat_dim"]),
@@ -158,40 +160,150 @@ def train_final_model(
     return model, {**model_config, **losses}
 
 
-def generate_multiple_imputations(
+def _feature_aware_aggregate(
+    mean_predictions: np.ndarray,
+    X0: np.ndarray,
+    source_mask: np.ndarray,
+    feature_specs: Tuple[OrderedFeature, ...],
+) -> np.ndarray:
+    """Aggregate draws and restore valid binary, ordinal, and categorical encodings."""
+    mean_predictions = np.asarray(mean_predictions, dtype=np.float64)
+    X0 = np.asarray(X0, dtype=np.float32)
+    source_mask = np.asarray(source_mask)
+    if X0.ndim != 2 or source_mask.shape != X0.shape:
+        raise ValueError("X0 and source_mask must be aligned two-dimensional matrices.")
+    if mean_predictions.shape != X0.shape:
+        raise ValueError(
+            "Mean predictions must match X0's shape; "
+            f"got {mean_predictions.shape} and {X0.shape}."
+        )
+    if not np.isfinite(X0).all() or not np.isfinite(mean_predictions).all():
+        raise ValueError("X0 and mean predictions must contain only finite values.")
+    if not np.isin(source_mask, (0, 1, 2)).all():
+        raise ValueError("source_mask must contain only mask values 0, 1, and 2.")
+    if len(feature_specs) != X0.shape[1]:
+        raise ValueError(
+            "feature_specs must contain one entry per column; "
+            f"got {len(feature_specs)} specs for {X0.shape[1]} columns."
+        )
+    names = [spec.name for spec in feature_specs]
+    if len(set(names)) != len(names):
+        raise ValueError("feature_specs contains duplicate column names.")
+
+    aggregated = X0.copy()
+    grouped_columns: Dict[tuple[str, str], list[int]] = {}
+    scalar_types = {"real_val", "pos_real_val", "count", "binary"}
+    grouped_types = {"ordinal", "categorical"}
+
+    for column_index, spec in enumerate(feature_specs):
+        if spec.feat_type in scalar_types:
+            target_rows = source_mask[:, column_index] != 0
+            values = mean_predictions[target_rows, column_index]
+            if spec.feat_type == "binary":
+                # Binary outputs are probabilities; threshold to restore {0, 1}.
+                aggregated[target_rows, column_index] = (values >= 0.5).astype(np.float32)
+            else:
+                # All numeric families, including standardized log-counts, use [-5, 5].
+                aggregated[target_rows, column_index] = np.clip(values, -5.0, 5.0).astype(np.float32)
+        elif spec.feat_type in grouped_types:
+            grouped_columns.setdefault((spec.feat_type, spec.base_feat), []).append(column_index)
+        else:
+            raise ValueError(
+                f"Unsupported feature type {spec.feat_type!r} for column {spec.name!r}."
+            )
+
+    for (feature_type, base_feature), column_indices in grouped_columns.items():
+        if feature_type == "ordinal":
+            prefix = f"{base_feature}-ge_"
+            try:
+                column_indices.sort(
+                    key=lambda index: int(feature_specs[index].name.removeprefix(prefix))
+                    if feature_specs[index].name.startswith(prefix)
+                    else -1
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Ordinal columns for {base_feature!r} must end in numeric '-ge_' thresholds."
+                ) from exc
+            threshold_numbers = [
+                int(feature_specs[index].name.removeprefix(prefix))
+                if feature_specs[index].name.startswith(prefix)
+                else -1
+                for index in column_indices
+            ]
+            if threshold_numbers != list(range(1, len(column_indices) + 1)):
+                raise ValueError(
+                    f"Ordinal feature {base_feature!r} has invalid thresholds: {threshold_numbers}."
+                )
+        else:
+            column_indices.sort(key=lambda index: feature_specs[index].name)
+            prefix = f"{base_feature}-is_"
+            if any(not feature_specs[index].name.startswith(prefix) for index in column_indices):
+                raise ValueError(
+                    f"Categorical columns for {base_feature!r} must use the '-is_' naming convention."
+                )
+
+        group_mask = source_mask[:, column_indices]
+        if not np.all(group_mask == group_mask[:, :1]):
+            raise ValueError(
+                f"Encoded columns for {base_feature!r} must share the same missingness mask."
+            )
+        target_rows = group_mask[:, 0] != 0
+        if not target_rows.any():
+            continue
+
+        group_mean = np.clip(mean_predictions[:, column_indices], 0.0, 1.0)
+        if feature_type == "categorical":
+            totals = group_mean.sum(axis=1, keepdims=True)
+            if np.any(totals[target_rows] <= 0.0):
+                raise ValueError(f"Categorical feature {base_feature!r} has zero probability mass.")
+            probabilities = group_mean / np.maximum(totals, 1e-12)
+            selected_levels = np.argmax(probabilities, axis=1)
+            encoded = np.eye(len(column_indices), dtype=np.float32)[selected_levels]
+        else:
+            # Convert cumulative P(Y >= level) into probabilities for each ordinal level.
+            level_probabilities = np.empty(
+                (X0.shape[0], len(column_indices) + 1), dtype=np.float64
+            )
+            level_probabilities[:, 0] = 1.0 - group_mean[:, 0]
+            if len(column_indices) > 1:
+                level_probabilities[:, 1:-1] = group_mean[:, :-1] - group_mean[:, 1:]
+            level_probabilities[:, -1] = group_mean[:, -1]
+            level_probabilities = np.clip(level_probabilities, 0.0, None)
+            totals = level_probabilities.sum(axis=1, keepdims=True)
+            if np.any(totals[target_rows] <= 0.0):
+                raise ValueError(f"Ordinal feature {base_feature!r} has zero probability mass.")
+            probabilities = level_probabilities / np.maximum(totals, 1e-12)
+            selected_levels = np.argmax(probabilities, axis=1)
+            thresholds = np.arange(1, len(column_indices) + 1)
+            encoded = (selected_levels[:, None] >= thresholds[None, :]).astype(np.float32)
+
+        aggregated[np.ix_(target_rows, column_indices)] = encoded[target_rows]
+
+    return aggregated
+
+
+def generate_feature_aware_aggregate(
     model: BetaGausMixedDVAE,
     X0: np.ndarray,
     source_mask: np.ndarray,
     feature_dict: FeaturesTypeDict,
+    feature_specs: Tuple[OrderedFeature, ...],
     num_imputations: int,
     imputation_cycles: int,
-    output_path: Path,
-) -> tuple[np.memmap, np.ndarray, np.ndarray]:
-    """Generate multiple draws, updating source-missing and amputed cells.
-
-    The original 0/1/2 source mask is retained. A separate operational mask
-    maps both type 1 and type 2 to type 2 because ``impute_multiple`` updates
-    only cells marked type 2.
-    """
+) -> np.ndarray:
+    """Generate stochastic draws online and return their feature-aware aggregate."""
     if not 5 <= int(num_imputations) <= 20:
         raise ValueError("`num_imputations` must be between 5 and 20.")
     if not 2 <= int(imputation_cycles) <= 20:
         raise ValueError("`imputation_cycles` must satisfy 2 <= value <= 20.")
     if X0.shape != source_mask.shape:
         raise ValueError("X0 and source mask must have identical shapes.")
+    if not np.isin(source_mask, (0, 1, 2)).all():
+        raise ValueError("source_mask must contain only mask values 0, 1, and 2.")
 
     imputation_mask = np.where(source_mask == 0, 0, 2).astype(np.int8)
-    output_path = Path(output_path)
-    if output_path.exists():
-        raise FileExistsError(f"Refusing to overwrite existing file: {output_path}")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    draws = np.lib.format.open_memmap(
-        output_path,
-        mode="w+",
-        dtype=np.float32,
-        shape=(int(num_imputations), *X0.shape),
-    )
-
+    prediction_sum = np.zeros(X0.shape, dtype=np.float64)
     device = next(model.parameters()).device
     model_input = torch.as_tensor(X0, dtype=torch.float32, device=device)
     mask_tensor = torch.as_tensor(imputation_mask, dtype=torch.int8, device=device)
@@ -206,10 +318,11 @@ def generate_multiple_imputations(
         draw_np = draw.detach().cpu().numpy()
         if not np.isfinite(draw_np).all():
             raise ValueError(f"Imputation draw {draw_index + 1} contains non-finite values.")
-        draws[draw_index] = draw_np
-    draws.flush()
-    mean_imputation = np.asarray(draws.mean(axis=0, dtype=np.float64), dtype=np.float32)
-    return draws, mean_imputation, imputation_mask
+        prediction_sum += draw_np
+
+    mean_predictions = prediction_sum / int(num_imputations)
+    aggregate = _feature_aware_aggregate(mean_predictions, X0, source_mask, feature_specs)
+    return aggregate
 
 
 def _json_feature_dict(feature_dict: FeaturesTypeDict) -> Dict[str, Any]:
@@ -247,11 +360,9 @@ def main() -> None:
     model_path = output_dir / "final_model" / "model.pt"
     config_path = output_dir / "run_config" / "config.json"
     imputations_dir = output_dir / "imputations"
-    draws_path = imputations_dir / "multiple_imputations.npy"
-    mean_path = imputations_dir / "mean_initial_imputation.npy"
+    aggregate_path = imputations_dir / "feature_aware_initial_imputation.npy"
     source_mask_path = imputations_dir / "source_missingness_mask.npy"
-    imputation_mask_path = imputations_dir / "model_imputation_mask.npy"
-    outputs = (model_path, config_path, draws_path, mean_path, source_mask_path, imputation_mask_path)
+    outputs = (model_path, config_path, aggregate_path, source_mask_path)
     existing = [path for path in outputs if path.exists()]
     if existing:
         raise FileExistsError("Refusing to overwrite Step 3 artifacts: " + ", ".join(map(str, existing)))
@@ -278,18 +389,17 @@ def main() -> None:
     }
     torch.save(checkpoint, model_path)
 
-    draws, mean_imputation, imputation_mask = generate_multiple_imputations(
+    aggregate = generate_feature_aware_aggregate(
         model=model,
         X0=inputs.X0,
         source_mask=inputs.source_mask,
         feature_dict=inputs.feature_dict,
+        feature_specs=inputs.feature_specs,
         num_imputations=int(cv_config["num_imputations"]),
         imputation_cycles=int(cv_config["recycles"]),
-        output_path=draws_path,
     )
-    np.save(mean_path, mean_imputation, allow_pickle=False)
+    np.save(aggregate_path, aggregate, allow_pickle=False)
     np.save(source_mask_path, inputs.source_mask, allow_pickle=False)
-    np.save(imputation_mask_path, imputation_mask, allow_pickle=False)
 
     run_config = {
         "selected_beta": beta,
@@ -301,7 +411,15 @@ def main() -> None:
             "num_imputations": int(cv_config["num_imputations"]),
             "cycles_per_draw": int(cv_config["recycles"]),
             "source_mask_semantics": "0 observed, 1 source-missing, 2 previously amputed",
-            "model_mask_semantics": "0 retained, 2 updated; source types 1 and 2 are targets",
+            "aggregation": {
+                "real_val": "mean across draws, clipped to [-5, 5]",
+                "pos_real_val": "mean across draws, clipped to [-5, 5]",
+                "count": "mean across draws in log1p-z-score space, clipped to [-5, 5]",
+                "binary": "mean across draws, thresholded at 0.5",
+                "ordinal": "MAP level from mean cumulative probabilities, unary encoded",
+                "categorical": "argmax of mean category probabilities, one-hot encoded",
+                "observed_cells": "preserved from the Step 1 input matrix",
+            },
         },
         "feature_columns": [spec.name for spec in inputs.feature_specs],
         "ordered_feature_specs": [spec._asdict() for spec in inputs.feature_specs],
@@ -315,13 +433,15 @@ def main() -> None:
     with open(config_path, "w", encoding="utf-8") as file:
         json.dump(run_config, file, indent=2, allow_nan=False)
 
-    # Q-learning handoff: model, X0, both masks, draws, and their mean are ready
-    # for the policy/reward implementation; this prototype creates no Q-table.
+    # Q-learning handoff: model, source mask, and encoded aggregate are ready;
+    # individual draws remain internal and this prototype creates no Q-table.
     print(json.dumps({
         "model_checkpoint": str(model_path),
-        "multiple_imputations": str(draws_path),
-        "mean_initial_imputation": str(mean_path),
-        "mean_target_cells_per_row": float(np.mean(np.count_nonzero(imputation_mask == 2, axis=1))),
+        "feature_aware_initial_imputation": str(aggregate_path),
+        "source_missingness_mask": str(source_mask_path),
+        "mean_target_cells_per_row": float(
+            np.mean(np.count_nonzero(inputs.source_mask != 0, axis=1))
+        ),
     }, indent=2))
 
 

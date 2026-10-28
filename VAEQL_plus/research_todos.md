@@ -56,7 +56,7 @@ a. Add evaluation support for a two-tier metric report <b>(TODO)</b>.
 | --- | --- |
 | continuous | transformed MAE/RMSE |
 | positive continuous | transformed MAE/RMSE |
-| count | log1p-space MAE/RMSE |
+| count | log1p-z-score-space MAE/RMSE |
 | binary | AUROC, F1 |
 | categorical | macro-F1 |
 | ordinal | ordinal MAE / weighted kappa |
