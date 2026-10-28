@@ -78,6 +78,7 @@ def _resolve_device(device_name: str) -> torch.device:
     return device
 
 
+#CHECKPOINT
 def train_final_model(
     X0: np.ndarray,
     source_mask: np.ndarray,

@@ -174,12 +174,27 @@ def test_count_features_are_log1p_z_scored_and_preserve_missing_values() -> None
     transformed, columns = preprocessor._transform_count(["count"])
 
     log_values = np.log1p(np.asarray([0.0, 1.0, 1_000_000.0], dtype=np.float32))
-    expected = (log_values - log_values.mean()) / log_values.std()
+    expected = np.clip(
+        (log_values - log_values.mean()) / log_values.std(), -5.0, 5.0
+    )
 
     assert columns == ["count"]
     assert np.allclose(transformed.loc[:2, "count"].to_numpy(), expected)
     assert np.isnan(transformed.loc[3, "count"])
-    assert expected[2] < 5.0  # a large raw count is compressed by log1p, not raw-capped
+
+
+def test_extreme_count_z_scores_are_clipped_to_five() -> None:
+    preprocessor = _make_preprocessor()
+    preprocessor.input_df = preprocessor.input_df.reindex(range(31))
+    preprocessor.input_df.loc[:, "count"] = [0.0] * 30 + [1_000_000.0]
+
+    transformed, _ = preprocessor._transform_count(["count"])
+
+    log_values = np.log1p(np.asarray([0.0] * 30 + [1_000_000.0], dtype=np.float32))
+    unclipped_z_score = (log_values[-1] - log_values.mean()) / log_values.std()
+
+    assert unclipped_z_score > 5.0
+    assert transformed.loc[30, "count"] == 5.0
 
 
 def test_constant_count_feature_is_z_scored_without_division_by_zero() -> None:

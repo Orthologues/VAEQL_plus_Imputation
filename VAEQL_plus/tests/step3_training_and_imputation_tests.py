@@ -7,7 +7,7 @@ from VAEQL_plus.step3_training_and_imputation.prototype import (
     generate_feature_aware_aggregate,
 )
 
-
+#COMMENTLOG: this test file is a prototype, it will need constant updates due to the modifications for the module `VAEQL_plus.step3_training_and_imputation`
 def test_feature_aware_aggregate_preserves_valid_feature_encodings():
     specs = (
         OrderedFeature("real", "real_val", "real"),
