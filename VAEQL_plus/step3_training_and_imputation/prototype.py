@@ -34,32 +34,6 @@ class Step3Inputs(NamedTuple):
     feature_dict: FeaturesTypeDict
 
 
-class Step3Handoff(NamedTuple):
-    """Trained VAE and inputs for batch-wise differentiable Q-learning."""
-
-    model: BetaGausMixedDVAE
-    X0: torch.Tensor
-    source_mask: torch.Tensor
-    feature_specs: Tuple[OrderedFeature, ...]
-    feature_dict: FeaturesTypeDict
-    training_metrics: Dict[str, float]
-    num_imputations: int
-    imputation_cycles: int
-
-    def impute_batch(self, row_indices: np.ndarray | torch.Tensor) -> torch.Tensor:
-        """Create a fresh graph-connected imputation aggregate for selected rows."""
-        rows = torch.as_tensor(row_indices, dtype=torch.long, device=self.X0.device).reshape(-1)
-        return generate_feature_aware_MI_aggregate(
-            model=self.model,
-            X0=self.X0.index_select(0, rows),
-            source_mask=self.source_mask.index_select(0, rows),
-            feature_dict=self.feature_dict,
-            feature_specs=self.feature_specs,
-            num_imputations=self.num_imputations,
-            imputation_cycles=self.imputation_cycles,
-        )
-
-
 def _read_json(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as file:
         value = json.load(file)
@@ -104,7 +78,6 @@ def _resolve_device(device_name: str) -> torch.device:
     return device
 
 
-##CHECKPOINT
 def train_vae_and_prepare_q_handoff(
     X0: np.ndarray,
     source_mask: np.ndarray,
@@ -226,6 +199,32 @@ def train_vae_on_full_dataset(
     return model, {**model_config, **losses}
 
 
+class Step3Handoff(NamedTuple):
+    """Trained VAE and inputs for batch-wise differentiable Q-learning."""
+
+    model: BetaGausMixedDVAE
+    X0: torch.Tensor
+    source_mask: torch.Tensor
+    feature_specs: Tuple[OrderedFeature, ...]
+    feature_dict: FeaturesTypeDict
+    training_metrics: Dict[str, float]
+    num_imputations: int
+    imputation_cycles: int
+
+    def impute_batch(self, row_indices: np.ndarray | torch.Tensor) -> torch.Tensor:
+        """Create a fresh graph-connected imputation aggregate for selected rows."""
+        rows = torch.as_tensor(row_indices, dtype=torch.long, device=self.X0.device).reshape(-1)
+        return generate_feature_aware_MI_aggregate(
+            model=self.model,
+            X0=self.X0.index_select(0, rows),
+            source_mask=self.source_mask.index_select(0, rows),
+            feature_dict=self.feature_dict,
+            feature_specs=self.feature_specs,
+            num_imputations=self.num_imputations,
+            imputation_cycles=self.imputation_cycles,
+        )
+
+
 def _feature_aware_MI_aggregate(
     imputation_draws: Iterable[torch.Tensor],
     X0: torch.Tensor,
@@ -282,15 +281,20 @@ def generate_feature_aware_MI_aggregate(
     device = next(model.parameters()).device
     model_input = torch.as_tensor(X0, dtype=torch.float32, device=device)
     source_mask = torch.as_tensor(source_mask, dtype=torch.int8, device=device)
-    mask_tensor = torch.where(source_mask == 0, 0, 2).to(dtype=torch.int8)
+    # Source states [0, 1, 2] become [1, 0, 0]: 1 observed, 0 missing.
+    obs_mask = torch.where(source_mask == 0, 1, 0).to(dtype=torch.int8)
+    # Step 3 updates both missing types; Step 2 instead selects only type-2 cells.
+    update_mask = obs_mask == 0
 
+    # CHECKPOINT
     def generate_draws() -> Iterable[torch.Tensor]:
         for _ in range(num_imputations):
             yield model.impute_multiple(
                 model_input,
                 max_iter=imputation_cycles,
-                X_mask=mask_tensor,
+                obs_mask=obs_mask,
                 feat_type_dict=feature_dict,
+                update_mask=update_mask,
                 differentiable=True,
             )
 

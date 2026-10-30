@@ -131,13 +131,17 @@ def test_batch_handoff_returns_soft_aggregate_with_vae_gradients():
             self.next_draw = 0  # produces a different output on each imputation call
 
         def impute_multiple(
-            self, model_input, max_iter, X_mask, feat_type_dict, differentiable=False
+            self, model_input, max_iter, obs_mask, feat_type_dict, update_mask, differentiable=False
         ):
             assert max_iter == 2  # handoff forwards the configured imputation-cycle count
-            # The observed first column stays type 0; both missing types are recoded to type 2.
+            # The observed first column is 1; both source-missing and amputed cells are 0.
             torch.testing.assert_close(
-                X_mask,
-                torch.tensor([[0, 2, 2, 2]], dtype=X_mask.dtype, device=X_mask.device),
+                obs_mask,
+                torch.tensor([[1, 0, 0, 0]], dtype=obs_mask.dtype, device=obs_mask.device),
+            )
+            torch.testing.assert_close(
+                update_mask,
+                torch.tensor([[False, True, True, True]], device=update_mask.device),
             )
             assert differentiable  # handoff requests a graph-connected imputation
             offset = self.next_draw  # draw-specific offset, from 0 through 4

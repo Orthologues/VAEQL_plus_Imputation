@@ -32,7 +32,7 @@ class BetaGausMixedDVAE(nn.Module):
     - trainable GMM prior parameters (`pi_k`, `mu_k`, `logvar_k`)
 
     Shapes:
-    - input `x` and missingness mask `X_mask`: `(B, D)`, where mask value 0 is observed.
+    - input `x` and source-state mask `X_mask`: `(B, D)`, where 0 is observed.
     - component logits/probabilities: `(B, K)`.
     - latent tensors: `(B, Z)`.
     - reconstruction logits: `(B, D)` in preprocessed feature space.
@@ -185,7 +185,7 @@ class BetaGausMixedDVAE(nn.Module):
         )
 
     def _observed_indicator(self, X_mask: ArrayLike, reference: torch.Tensor) -> torch.Tensor:
-        """Map the repository's mask (0=observed) to the paper's (https://arxiv.org/pdf/2006.05301) indicator (1=observed)."""
+        """Convert the source-state mask (0=observed) to a 1=observed indicator."""
         mask_t = torch.as_tensor(X_mask, device=reference.device)
         expected_shape = (reference.shape[0], self.input_dim)
         if tuple(mask_t.shape) != expected_shape:
@@ -193,6 +193,24 @@ class BetaGausMixedDVAE(nn.Module):
                 f"`X_mask` must have shape {expected_shape}, got {tuple(mask_t.shape)}"
             )
         return (mask_t == 0).to(dtype=reference.dtype)
+
+    def _binary_observation_indicator(
+        self, obs_mask: ArrayLike, reference: torch.Tensor
+    ) -> torch.Tensor:
+        """Validate a Step 3 mask with the conventional encoding 1=observed, 0=missing."""
+        mask_t = torch.as_tensor(obs_mask, device=reference.device)
+        expected_shape = (reference.shape[0], self.input_dim)
+        if tuple(mask_t.shape) != expected_shape:
+            raise ValueError(
+                f"`obs_mask` must have shape {expected_shape}, got {tuple(mask_t.shape)}"
+            )
+        valid_values = (mask_t == 0) | (mask_t == 1)
+        if not bool(valid_values.all().item()):
+            invalid_values = torch.unique(mask_t[~valid_values]).detach().tolist()
+            raise ValueError(
+                f"`obs_mask` must be binary with 1=observed and 0=missing, got {invalid_values}"
+            )
+        return mask_t.to(dtype=reference.dtype)
 
     # Encoding
     def encode(self, x: torch.Tensor, X_mask: ArrayLike) -> "BetaGausMixedDVAE.EncodingOutput":
@@ -206,6 +224,11 @@ class BetaGausMixedDVAE(nn.Module):
         - `posterior_z_component_logvar`: `(B, K, Z)` K-conditioned log-variances
         """
         observed = self._observed_indicator(X_mask, x)
+        return self._encode_with_indicator(x, observed)
+
+    def _encode_with_indicator(
+        self, x: torch.Tensor, observed: torch.Tensor
+    ) -> "BetaGausMixedDVAE.EncodingOutput":
         encoded_head = self.encoder["vanilla_encoder"](torch.cat((x, observed), dim=1))
         posterior_k_logits = self.encoder["gmm_encoder"]["k_logits_head"](encoded_head)  # (B, K)
         posterior_k_probs = torch.softmax(posterior_k_logits, dim=1)   # (B, K)
@@ -279,6 +302,11 @@ class BetaGausMixedDVAE(nn.Module):
     def decode(self, posterior_z: torch.Tensor, X_mask: ArrayLike) -> torch.Tensor:
         """Condition latent decoder features on the observed indicator."""
         observed = self._observed_indicator(X_mask, posterior_z)
+        return self._decode_with_indicator(posterior_z, observed)
+
+    def _decode_with_indicator(
+        self, posterior_z: torch.Tensor, observed: torch.Tensor
+    ) -> torch.Tensor:
         latent_features = self.decoder["latent_trunk"](posterior_z)
         return self.decoder["mask_fusion"](torch.cat((latent_features, observed), dim=1))
 
@@ -393,13 +421,26 @@ class BetaGausMixedDVAE(nn.Module):
         - `posterior_z_component_mean`: `(B, K, Z)`
         - `posterior_z_component_logvar`: `(B, K, Z)`
         """
-        encoded = self.encode(x, X_mask)
+        observed = self._observed_indicator(X_mask, x)
+        return self._forward_with_indicator(x, observed)
+
+    def forward_with_observation_mask(
+        self, x: torch.Tensor, obs_mask: ArrayLike
+    ) -> Dict[str, torch.Tensor]:
+        """Step 3 forward pass taking a binary mask (1=observed, 0=missing)."""
+        observed = self._binary_observation_indicator(obs_mask, x)
+        return self._forward_with_indicator(x, observed)
+
+    def _forward_with_indicator(
+        self, x: torch.Tensor, observed: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        encoded = self._encode_with_indicator(x, observed)
         z = self.reparameterize_mixture(
             encoded.posterior_z_component_mean,
             encoded.posterior_z_component_logvar,
             encoded.posterior_k_logits,
         )
-        recon_logits = self.decode(z, X_mask)
+        recon_logits = self._decode_with_indicator(z, observed)
         return {
             "recon_logits": recon_logits,
             "posterior_k_logits": encoded.posterior_k_logits,
@@ -548,7 +589,7 @@ class BetaGausMixedDVAE(nn.Module):
         - `beta`, `capacity_C`: KL-capacity objective hyperparameters.
         - `gmm_prior`: dict with keys `logits`, `means`, `logvars` for prior parameters.
         - `feat_type_dict`: feature-type metadata including `all_feats` and type groups.
-        - `obs_mask`: `(B, D)` mask; `0` denotes observed entries used for reconstruction weighting.
+        - `obs_mask`: `(B, D)` source-state mask; `0` denotes observed entries used for reconstruction weighting.
         - `eps`: positive scalar for numerical stability in weighted reductions.
 
         Behavior:
@@ -858,9 +899,12 @@ class BetaGausMixedDVAE(nn.Module):
         self,
         X_incomplete: ArrayLike,
         max_iter: int,
-        X_mask: ArrayLike,
+        X_mask: ArrayLike | None = None,
         feat_type_dict: FeaturesTypeDict | None = None,
         differentiable: bool = False,
+        *,
+        obs_mask: ArrayLike | None = None,
+        update_mask: ArrayLike | None = None,
     ) -> torch.Tensor:
         """
         Produce one iterative stochastic imputation sample.
@@ -868,16 +912,16 @@ class BetaGausMixedDVAE(nn.Module):
         Inputs:
         - `X_incomplete`: `(N, D)` pre-imputed input with no NaN values at `VAEQL_plus.step1_preprocessing.feat_preprocessor`.
         - `max_iter`: number of iterative update cycles; must satisfy `2 <= max_iter <= 20`.
-        - `X_mask`: `(N, D)` mask with semantics:
-          `0` = observed after amputation,
-          `1` = pre-existing NaN values in raw data,
-          `2` = newly amputated values.
+        - `X_mask`: legacy source-state mask used by Step 2 (`0` observed,
+          `1` source-missing, `2` previously amputated); only type-2 cells update.
+        - `obs_mask`: optional Step 3 binary mask (`1` observed, `0` missing).
+        - `update_mask`: optional Step 3 boolean selector; defaults to all missing cells.
 
         Behavior:
         - expects `X_incomplete` to be already pre-imputed (no NaN values allowed)
-        - repeatedly run model forward with the fixed mask (and stochastic latent sampling)
-        - keep type-0 and type-1 cells fixed at their `X_incomplete` values
-        - retain iterative updates only for type-2 cells (`X_mask == 2`)
+        - repeatedly run the model with a fixed mask and stochastic latent sampling
+        - when `X_mask` is supplied, retain Step 2's type-2-only update behavior;
+          when `obs_mask` is supplied, update the selected missing cells
         - with `differentiable=True`, enable autograd and retain the graph for
           losses that should update this VAE; the default remains detached inference
 
@@ -893,21 +937,38 @@ class BetaGausMixedDVAE(nn.Module):
         )
         if int(max_iter) < 2 or int(max_iter) > 20:
             raise ValueError(f"`max_iter` must satisfy 2 <= `max_iter` <= 20, got {max_iter}")
-        x_mask_t = (
-            X_mask.to(device=device, dtype=torch.int64)
-            if isinstance(X_mask, torch.Tensor)
-            else torch.tensor(X_mask, dtype=torch.int64, device=device)
-        )
-        if x_incomplete_t.shape != x_mask_t.shape:
-            raise ValueError(
-                f"Shape mismatch: `X_incomplete` {tuple(x_incomplete_t.shape)}, "
-                f"`X_mask` {tuple(x_mask_t.shape)}"
-            )
-        BetaGausMixedDVAEUtils.mask_type2_indices(x_mask_t, tuple(x_incomplete_t.shape))
+        if (X_mask is None) == (obs_mask is None):
+            raise ValueError("Supply exactly one of the Step 2 `X_mask` or Step 3 `obs_mask` arguments.")
         if bool(torch.isnan(x_incomplete_t).any().item()):
             raise ValueError("`X_incomplete` must be pre-imputed and contain no NaN values in `impute_multiple`.")
 
-        update_mask = (x_mask_t == 2)
+        if obs_mask is not None:
+            obs_mask_t = self._binary_observation_indicator(obs_mask, x_incomplete_t).to(dtype=torch.int8)
+            if update_mask is None:
+                update_mask_t = obs_mask_t == 0
+            else:
+                update_mask_t = torch.as_tensor(update_mask, device=device, dtype=torch.bool)
+                if update_mask_t.shape != x_incomplete_t.shape:
+                    raise ValueError(
+                        f"`update_mask` must have shape {tuple(x_incomplete_t.shape)}, "
+                        f"got {tuple(update_mask_t.shape)}"
+                    )
+                if bool((update_mask_t & (obs_mask_t != 0)).any().item()):
+                    raise ValueError("`update_mask` may select only cells marked missing in `obs_mask`.")
+            source_mask_t = None
+        else:
+            source_mask_t = (
+                X_mask.to(device=device, dtype=torch.int64)
+                if isinstance(X_mask, torch.Tensor)
+                else torch.tensor(X_mask, dtype=torch.int64, device=device)
+            )
+            if x_incomplete_t.shape != source_mask_t.shape:
+                raise ValueError(
+                    f"Shape mismatch: `X_incomplete` {tuple(x_incomplete_t.shape)}, "
+                    f"`X_mask` {tuple(source_mask_t.shape)}"
+                )
+            BetaGausMixedDVAEUtils.mask_type2_indices(source_mask_t, tuple(x_incomplete_t.shape))
+            update_mask_t = source_mask_t == 2
         temp_x_t = x_incomplete_t.clone()
 
         was_training = self.training
@@ -916,12 +977,12 @@ class BetaGausMixedDVAE(nn.Module):
             for iter_idx in range(max_iter):
                 try:
                     with torch.set_grad_enabled(differentiable):
-                        output_t = self.forward(temp_x_t, x_mask_t)
+                        if source_mask_t is None:
+                            output_t = self.forward_with_observation_mask(temp_x_t, obs_mask_t)
+                        else:
+                            output_t = self.forward(temp_x_t, source_mask_t)
                         recon = self.activate_reconstruction(output_t["recon_logits"], feat_type_dict)
-                        # This updates only mask-2 cells. Step 3 recodes both source-missing
-                        # (type 1) and previously amputed (type 2) cells as type 2 before
-                        # calling this method, so final imputation reconstructs both groups.
-                        temp_x_t = torch.where(update_mask, recon, x_incomplete_t)
+                        temp_x_t = torch.where(update_mask_t, recon, x_incomplete_t)
                 except Exception as exc:
                     raise RuntimeError(
                         f"`impute_multiple` failed at iteration {iter_idx + 1}/{max_iter}"

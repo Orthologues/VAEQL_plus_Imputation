@@ -304,10 +304,39 @@ def test_iterative_imputation_retains_observed_values_with_mask() -> None:
     source_mask[:, 1] = 1
 
     imputed = model.impute_multiple(
-        x, max_iter=2, X_mask=source_mask, feat_type_dict=FEAT_TYPE_DICT
+        x,
+        max_iter=2,
+        X_mask=source_mask,
+        feat_type_dict=FEAT_TYPE_DICT,
     )
     torch.testing.assert_close(imputed[source_mask != 2], x[source_mask != 2])
     assert torch.isfinite(imputed).all()
+
+
+def test_step3_imputation_accepts_binary_observation_mask() -> None:
+    x = _build_toy_batch()
+    model = _build_Gumbel_Softmax_model(tau_start=0.5)
+    obs_mask = torch.ones_like(x, dtype=torch.int8)
+    obs_mask[:, :2] = 0
+    update_mask = obs_mask == 0
+
+    imputed = model.impute_multiple(
+        x,
+        max_iter=2,
+        obs_mask=obs_mask,
+        update_mask=update_mask,
+        feat_type_dict=FEAT_TYPE_DICT,
+    )
+
+    torch.testing.assert_close(imputed[:, 2:], x[:, 2:])
+    assert torch.isfinite(imputed).all()
+    with pytest.raises(ValueError, match="binary"):
+        model.impute_multiple(
+            x,
+            max_iter=2,
+            obs_mask=torch.full_like(x, 0.5),
+            feat_type_dict=FEAT_TYPE_DICT,
+        )
 
 
 def test_randomized_k_logits_activation_selection_summary() -> None:
@@ -514,10 +543,10 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
 def test_reconstruction_loss_excludes_type1_and_type2_targets() -> None:
     x = _build_toy_batch()
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
-    obs_mask = torch.zeros_like(x, dtype=torch.int8)
-    obs_mask[:, 0] = 1
-    obs_mask[:, 1] = 2
-    output = model(x, obs_mask)
+    source_mask = torch.zeros_like(x, dtype=torch.int8)
+    source_mask[:, 0] = 1
+    source_mask[:, 1] = 2
+    output = model(x, source_mask)
 
     def calculate(target: torch.Tensor) -> torch.Tensor:
         return model.beta_capacity_loss(
@@ -530,7 +559,7 @@ def test_reconstruction_loss_excludes_type1_and_type2_targets() -> None:
             capacity_C=0.0,
             gmm_prior=model.get_gmm_prior_params(),
             feat_type_dict=FEAT_TYPE_DICT,
-            obs_mask=obs_mask,
+            obs_mask=source_mask,
         ).recon_loss
 
     original_loss = calculate(x)
