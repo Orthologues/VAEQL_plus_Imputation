@@ -1,8 +1,8 @@
-"""Train the selected GMM beta-VAE and generate an initial Step 3 imputation.
+"""Train the selected GMM beta-VAE and prepare a differentiable Q handoff.
 
 This prototype consumes the Step 1 preprocessing bundle and the selected
-beta/C pair from Step 2. It deliberately stops before Q-learning; the trained
-model, source mask, and feature-aware aggregate are the handoff.
+beta/C pair from Step 2. The returned handoff creates graph-connected soft
+imputations per Q-learning batch; the Q-learning algorithm is implemented later.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Tuple
+from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
 import numpy as np
 import torch
@@ -32,6 +32,32 @@ class Step3Inputs(NamedTuple):
     source_mask: np.ndarray
     feature_specs: Tuple[OrderedFeature, ...]
     feature_dict: FeaturesTypeDict
+
+
+class Step3Handoff(NamedTuple):
+    """Trained VAE and inputs for batch-wise differentiable Q-learning."""
+
+    model: BetaGausMixedDVAE
+    X0: torch.Tensor
+    source_mask: torch.Tensor
+    feature_specs: Tuple[OrderedFeature, ...]
+    feature_dict: FeaturesTypeDict
+    training_metrics: Dict[str, float]
+    num_imputations: int
+    imputation_cycles: int
+
+    def impute_batch(self, row_indices: np.ndarray | torch.Tensor) -> torch.Tensor:
+        """Create a fresh graph-connected imputation aggregate for selected rows."""
+        rows = torch.as_tensor(row_indices, dtype=torch.long, device=self.X0.device).reshape(-1)
+        return generate_feature_aware_MI_aggregate(
+            model=self.model,
+            X0=self.X0.index_select(0, rows),
+            source_mask=self.source_mask.index_select(0, rows),
+            feature_dict=self.feature_dict,
+            feature_specs=self.feature_specs,
+            num_imputations=self.num_imputations,
+            imputation_cycles=self.imputation_cycles,
+        )
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -78,8 +104,47 @@ def _resolve_device(device_name: str) -> torch.device:
     return device
 
 
-#CHECKPOINT
-def train_final_model(
+##CHECKPOINT
+def train_vae_and_prepare_q_handoff(
+    X0: np.ndarray,
+    source_mask: np.ndarray,
+    feature_dict: FeaturesTypeDict,
+    feature_specs: Tuple[OrderedFeature, ...],
+    beta: float,
+    capacity_C: float,
+    train_config: Dict[str, Any],
+    device: torch.device,
+    num_imputations: int,
+    imputation_cycles: int,
+) -> Step3Handoff:
+    """Train the VAE and return a batch-lazy differentiable Q-learning handoff.
+
+    Call ``handoff.impute_batch(row_indices)`` inside each Q-learning update.
+    The returned aggregate stays connected to the VAE for that update's backward
+    pass; later updates generate fresh graphs and stochastic imputations.
+    """
+    model, training_metrics = train_vae_on_full_dataset(
+        X0=X0,
+        source_mask=source_mask,
+        feature_dict=feature_dict,
+        beta=beta,
+        capacity_C=capacity_C,
+        train_config=train_config,
+        device=device,
+    )
+    return Step3Handoff(
+        model=model,
+        X0=torch.as_tensor(X0, dtype=torch.float32, device=device),
+        source_mask=torch.as_tensor(source_mask, dtype=torch.int8, device=device),
+        feature_specs=feature_specs,
+        feature_dict=feature_dict,
+        training_metrics=training_metrics,
+        num_imputations=num_imputations,
+        imputation_cycles=imputation_cycles,
+    )
+
+
+def train_vae_on_full_dataset(
     X0: np.ndarray,
     source_mask: np.ndarray,
     feature_dict: FeaturesTypeDict,
@@ -161,169 +226,78 @@ def train_final_model(
     return model, {**model_config, **losses}
 
 
-def _feature_aware_aggregate(
-    mean_predictions: np.ndarray,
-    X0: np.ndarray,
-    source_mask: np.ndarray,
+def _feature_aware_MI_aggregate(
+    imputation_draws: Iterable[torch.Tensor],
+    X0: torch.Tensor,
+    source_mask: torch.Tensor,
     feature_specs: Tuple[OrderedFeature, ...],
-) -> np.ndarray:
-    """Aggregate draws and restore valid binary, ordinal, and categorical encodings."""
-    mean_predictions = np.asarray(mean_predictions, dtype=np.float64)
-    X0 = np.asarray(X0, dtype=np.float32)
-    source_mask = np.asarray(source_mask)
+) -> torch.Tensor:
+    """Average soft imputation draws without breaking their autograd graphs.
+
+    Elementwise averaging preserves binary probabilities, categorical simplex
+    vectors, and monotone ordinal cumulative probabilities. Only numeric features
+    are clipped; observed cells are copied from the Step 1 input.
+    """
+    X0 = torch.as_tensor(X0, dtype=torch.float32)
+    source_mask = torch.as_tensor(source_mask, device=X0.device)
     if X0.ndim != 2 or source_mask.shape != X0.shape:
-        raise ValueError("X0 and source_mask must be aligned two-dimensional matrices.")
-    if mean_predictions.shape != X0.shape:
-        raise ValueError(
-            "Mean predictions must match X0's shape; "
-            f"got {mean_predictions.shape} and {X0.shape}."
-        )
-    if not np.isfinite(X0).all() or not np.isfinite(mean_predictions).all():
-        raise ValueError("X0 and mean predictions must contain only finite values.")
-    if not np.isin(source_mask, (0, 1, 2)).all():
-        raise ValueError("source_mask must contain only mask values 0, 1, and 2.")
+        raise ValueError("X0 and source_mask must have the same two-dimensional shape.")
     if len(feature_specs) != X0.shape[1]:
-        raise ValueError(
-            "feature_specs must contain one entry per column; "
-            f"got {len(feature_specs)} specs for {X0.shape[1]} columns."
-        )
-    names = [spec.name for spec in feature_specs]
-    if len(set(names)) != len(names):
-        raise ValueError("feature_specs contains duplicate column names.")
+        raise ValueError("feature_specs must have one entry per matrix column.")
 
-    aggregated = X0.copy()
-    grouped_columns: Dict[tuple[str, str], list[int]] = {}
-    scalar_types = {"real_val", "pos_real_val", "count", "binary"}
-    grouped_types = {"ordinal", "categorical"}
+    numeric_columns = torch.tensor(
+        [spec.feat_type in {"real_val", "pos_real_val", "count"} for spec in feature_specs],
+        dtype=torch.bool,
+        device=X0.device,
+    )
+    draw_sum = None
+    draw_count = 0
+    for draw in imputation_draws:
+        draw = torch.as_tensor(draw, dtype=X0.dtype, device=X0.device)
+        if draw.shape != X0.shape:
+            raise ValueError("Every imputation draw must have the same shape as X0.")
+        draw_sum = draw if draw_sum is None else draw_sum + draw
+        draw_count += 1
 
-    for column_index, spec in enumerate(feature_specs):
-        if spec.feat_type in scalar_types:
-            target_rows = source_mask[:, column_index] != 0
-            values = mean_predictions[target_rows, column_index]
-            if spec.feat_type == "binary":
-                # Binary outputs are probabilities; threshold to restore {0, 1}.
-                aggregated[target_rows, column_index] = (values >= 0.5).astype(np.float32)
-            else:
-                # All numeric families, including standardized log-counts, use [-5, 5].
-                aggregated[target_rows, column_index] = np.clip(values, -5.0, 5.0).astype(np.float32)
-        elif spec.feat_type in grouped_types:
-            grouped_columns.setdefault((spec.feat_type, spec.base_feat), []).append(column_index)
-        else:
-            raise ValueError(
-                f"Unsupported feature type {spec.feat_type!r} for column {spec.name!r}."
-            )
+    if draw_sum is None:
+        raise ValueError("At least one imputation draw is required.")
 
-    for (feature_type, base_feature), column_indices in grouped_columns.items():
-        if feature_type == "ordinal":
-            prefix = f"{base_feature}-ge_"
-            try:
-                column_indices.sort(
-                    key=lambda index: int(feature_specs[index].name.removeprefix(prefix))
-                    if feature_specs[index].name.startswith(prefix)
-                    else -1
-                )
-            except ValueError as exc:
-                raise ValueError(
-                    f"Ordinal columns for {base_feature!r} must end in numeric '-ge_' thresholds."
-                ) from exc
-            threshold_numbers = [
-                int(feature_specs[index].name.removeprefix(prefix))
-                if feature_specs[index].name.startswith(prefix)
-                else -1
-                for index in column_indices
-            ]
-            if threshold_numbers != list(range(1, len(column_indices) + 1)):
-                raise ValueError(
-                    f"Ordinal feature {base_feature!r} has invalid thresholds: {threshold_numbers}."
-                )
-        else:
-            column_indices.sort(key=lambda index: feature_specs[index].name)
-            prefix = f"{base_feature}-is_"
-            if any(not feature_specs[index].name.startswith(prefix) for index in column_indices):
-                raise ValueError(
-                    f"Categorical columns for {base_feature!r} must use the '-is_' naming convention."
-                )
-
-        group_mask = source_mask[:, column_indices]
-        if not np.all(group_mask == group_mask[:, :1]):
-            raise ValueError(
-                f"Encoded columns for {base_feature!r} must share the same missingness mask."
-            )
-        target_rows = group_mask[:, 0] != 0
-        if not target_rows.any():
-            continue
-
-        group_mean = np.clip(mean_predictions[:, column_indices], 0.0, 1.0)
-        if feature_type == "categorical":
-            totals = group_mean.sum(axis=1, keepdims=True)
-            if np.any(totals[target_rows] <= 0.0):
-                raise ValueError(f"Categorical feature {base_feature!r} has zero probability mass.")
-            probabilities = group_mean / np.maximum(totals, 1e-12)
-            selected_levels = np.argmax(probabilities, axis=1)
-            encoded = np.eye(len(column_indices), dtype=np.float32)[selected_levels]
-        else:
-            # Convert cumulative P(Y >= level) into probabilities for each ordinal level.
-            level_probabilities = np.empty(
-                (X0.shape[0], len(column_indices) + 1), dtype=np.float64
-            )
-            level_probabilities[:, 0] = 1.0 - group_mean[:, 0]
-            if len(column_indices) > 1:
-                level_probabilities[:, 1:-1] = group_mean[:, :-1] - group_mean[:, 1:]
-            level_probabilities[:, -1] = group_mean[:, -1]
-            level_probabilities = np.clip(level_probabilities, 0.0, None)
-            totals = level_probabilities.sum(axis=1, keepdims=True)
-            if np.any(totals[target_rows] <= 0.0):
-                raise ValueError(f"Ordinal feature {base_feature!r} has zero probability mass.")
-            probabilities = level_probabilities / np.maximum(totals, 1e-12)
-            selected_levels = np.argmax(probabilities, axis=1)
-            thresholds = np.arange(1, len(column_indices) + 1)
-            encoded = (selected_levels[:, None] >= thresholds[None, :]).astype(np.float32)
-
-        aggregated[np.ix_(target_rows, column_indices)] = encoded[target_rows]
-
-    return aggregated
+    mean_draw = draw_sum / draw_count
+    mean_draw = torch.where(numeric_columns, mean_draw.clamp(-5.0, 5.0), mean_draw)
+    return torch.where(source_mask == 0, X0, mean_draw)
 
 
-def generate_feature_aware_aggregate(
+def generate_feature_aware_MI_aggregate(
     model: BetaGausMixedDVAE,
-    X0: np.ndarray,
-    source_mask: np.ndarray,
+    X0: np.ndarray | torch.Tensor,
+    source_mask: np.ndarray | torch.Tensor,
     feature_dict: FeaturesTypeDict,
     feature_specs: Tuple[OrderedFeature, ...],
     num_imputations: int,
     imputation_cycles: int,
-) -> np.ndarray:
-    """Generate stochastic draws online and return their feature-aware aggregate."""
-    if not 5 <= int(num_imputations) <= 20:
-        raise ValueError("`num_imputations` must be between 5 and 20.")
-    if not 2 <= int(imputation_cycles) <= 20:
-        raise ValueError("`imputation_cycles` must satisfy 2 <= value <= 20.")
-    if X0.shape != source_mask.shape:
-        raise ValueError("X0 and source mask must have identical shapes.")
-    if not np.isin(source_mask, (0, 1, 2)).all():
-        raise ValueError("source_mask must contain only mask values 0, 1, and 2.")
-
-    imputation_mask = np.where(source_mask == 0, 0, 2).astype(np.int8)
-    prediction_sum = np.zeros(X0.shape, dtype=np.float64)
+) -> torch.Tensor:
+    """Generate soft draws whose aggregate remains differentiable to the VAE."""
+    num_imputations = int(num_imputations)
+    imputation_cycles = int(imputation_cycles)
     device = next(model.parameters()).device
     model_input = torch.as_tensor(X0, dtype=torch.float32, device=device)
-    mask_tensor = torch.as_tensor(imputation_mask, dtype=torch.int8, device=device)
-    for draw_index in range(int(num_imputations)):
-        print(f"[Initial imputation] draw {draw_index + 1}/{num_imputations}")
-        draw = model.impute_multiple(
-            model_input,
-            max_iter=int(imputation_cycles),
-            X_mask=mask_tensor,
-            feat_type_dict=feature_dict,
-        )
-        draw_np = draw.detach().cpu().numpy()
-        if not np.isfinite(draw_np).all():
-            raise ValueError(f"Imputation draw {draw_index + 1} contains non-finite values.")
-        prediction_sum += draw_np
+    source_mask = torch.as_tensor(source_mask, dtype=torch.int8, device=device)
+    mask_tensor = torch.where(source_mask == 0, 0, 2).to(dtype=torch.int8)
 
-    mean_predictions = prediction_sum / int(num_imputations)
-    aggregate = _feature_aware_aggregate(mean_predictions, X0, source_mask, feature_specs)
-    return aggregate
+    def generate_draws() -> Iterable[torch.Tensor]:
+        for _ in range(num_imputations):
+            yield model.impute_multiple(
+                model_input,
+                max_iter=imputation_cycles,
+                X_mask=mask_tensor,
+                feat_type_dict=feature_dict,
+                differentiable=True,
+            )
+
+    with torch.enable_grad():
+        return _feature_aware_MI_aggregate(
+            generate_draws(), model_input, source_mask, feature_specs
+        )
 
 
 def _json_feature_dict(feature_dict: FeaturesTypeDict) -> Dict[str, Any]:
@@ -344,7 +318,7 @@ def _json_feature_dict(feature_dict: FeaturesTypeDict) -> Dict[str, Any]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the selected GMM beta-VAE and create initial imputations."
+        description="Train the selected GMM beta-VAE and prepare a differentiable Q handoff."
     )
     parser.add_argument("--preprocessed-dir", type=Path, required=True)
     parser.add_argument("--beta-summary", type=Path, required=True)
@@ -361,9 +335,8 @@ def main() -> None:
     model_path = output_dir / "final_model" / "model.pt"
     config_path = output_dir / "run_config" / "config.json"
     imputations_dir = output_dir / "imputations"
-    aggregate_path = imputations_dir / "feature_aware_initial_imputation.npy"
     source_mask_path = imputations_dir / "source_missingness_mask.npy"
-    outputs = (model_path, config_path, aggregate_path, source_mask_path)
+    outputs = (model_path, config_path, source_mask_path)
     existing = [path for path in outputs if path.exists()]
     if existing:
         raise FileExistsError("Refusing to overwrite Step 3 artifacts: " + ", ".join(map(str, existing)))
@@ -373,9 +346,20 @@ def main() -> None:
     train_config = _read_json(args.training_config)
     cv_config = _read_json(args.cv_config)
     device = _resolve_device(args.device)
-    model, training_metrics = train_final_model(
-        inputs.X0, inputs.source_mask, inputs.feature_dict, beta, capacity_C, train_config, device
+    handoff = train_vae_and_prepare_q_handoff(
+        X0=inputs.X0,
+        source_mask=inputs.source_mask,
+        feature_dict=inputs.feature_dict,
+        feature_specs=inputs.feature_specs,
+        beta=beta,
+        capacity_C=capacity_C,
+        train_config=train_config,
+        device=device,
+        num_imputations=int(cv_config["num_imputations"]),
+        imputation_cycles=int(cv_config["recycles"]),
     )
+    model = handoff.model
+    training_metrics = handoff.training_metrics
 
     for directory in (model_path.parent, config_path.parent, imputations_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -390,17 +374,7 @@ def main() -> None:
     }
     torch.save(checkpoint, model_path)
 
-    aggregate = generate_feature_aware_aggregate(
-        model=model,
-        X0=inputs.X0,
-        source_mask=inputs.source_mask,
-        feature_dict=inputs.feature_dict,
-        feature_specs=inputs.feature_specs,
-        num_imputations=int(cv_config["num_imputations"]),
-        imputation_cycles=int(cv_config["recycles"]),
-    )
-    np.save(aggregate_path, aggregate, allow_pickle=False)
-    np.save(source_mask_path, inputs.source_mask, allow_pickle=False)
+    np.save(source_mask_path, handoff.source_mask.detach().cpu().numpy(), allow_pickle=False)
 
     run_config = {
         "selected_beta": beta,
@@ -416,9 +390,9 @@ def main() -> None:
                 "real_val": "mean across draws, clipped to [-5, 5]",
                 "pos_real_val": "mean across draws, clipped to [-5, 5]",
                 "count": "mean across draws in log1p-z-score space, clipped to [-5, 5]",
-                "binary": "mean across draws, thresholded at 0.5",
-                "ordinal": "MAP level from mean cumulative probabilities, unary encoded",
-                "categorical": "argmax of mean category probabilities, one-hot encoded",
+                "binary": "mean sigmoid probability across draws; kept soft",
+                "ordinal": "mean monotone cumulative probabilities across draws; kept soft",
+                "categorical": "mean Gumbel-Softmax probability vector across draws; kept soft",
                 "observed_cells": "preserved from the Step 1 input matrix",
             },
         },
@@ -434,12 +408,12 @@ def main() -> None:
     with open(config_path, "w", encoding="utf-8") as file:
         json.dump(run_config, file, indent=2, allow_nan=False)
 
-    # Q-learning handoff: model, source mask, and encoded aggregate are ready;
-    # individual draws remain internal and this prototype creates no Q-table.
+    # The standalone CLI writes model and metadata snapshots. For differentiable
+    # Q-learning, call `train_vae_and_prepare_q_handoff` and impute each batch in-process.
     print(json.dumps({
         "model_checkpoint": str(model_path),
-        "feature_aware_initial_imputation": str(aggregate_path),
         "source_missingness_mask": str(source_mask_path),
+        "differentiable_handoff": "Step3Handoff.impute_batch(row_indices)",
         "mean_target_cells_per_row": float(
             np.mean(np.count_nonzero(inputs.source_mask != 0, axis=1))
         ),

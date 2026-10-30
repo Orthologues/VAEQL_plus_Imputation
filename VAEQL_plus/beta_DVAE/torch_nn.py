@@ -860,6 +860,7 @@ class BetaGausMixedDVAE(nn.Module):
         max_iter: int,
         X_mask: ArrayLike,
         feat_type_dict: FeaturesTypeDict | None = None,
+        differentiable: bool = False,
     ) -> torch.Tensor:
         """
         Produce one iterative stochastic imputation sample.
@@ -877,9 +878,12 @@ class BetaGausMixedDVAE(nn.Module):
         - repeatedly run model forward with the fixed mask (and stochastic latent sampling)
         - keep type-0 and type-1 cells fixed at their `X_incomplete` values
         - retain iterative updates only for type-2 cells (`X_mask == 2`)
+        - with `differentiable=True`, enable autograd and retain the graph for
+          losses that should update this VAE; the default remains detached inference
 
         Returns:
-        - imputed matrix of shape `(N, D)` as torch Tensor on model device
+        - imputed matrix of shape `(N, D)` on the model device; when
+          `differentiable=True`, its graph remains connected to model parameters.
         """
         device = self.device
         x_incomplete_t = (
@@ -911,10 +915,13 @@ class BetaGausMixedDVAE(nn.Module):
         try:
             for iter_idx in range(max_iter):
                 try:
-                    with torch.no_grad():
+                    with torch.set_grad_enabled(differentiable):
                         output_t = self.forward(temp_x_t, x_mask_t)
                         recon = self.activate_reconstruction(output_t["recon_logits"], feat_type_dict)
-                    temp_x_t = torch.where(update_mask, recon, x_incomplete_t)
+                        # This updates only mask-2 cells. Step 3 recodes both source-missing
+                        # (type 1) and previously amputed (type 2) cells as type 2 before
+                        # calling this method, so final imputation reconstructs both groups.
+                        temp_x_t = torch.where(update_mask, recon, x_incomplete_t)
                 except Exception as exc:
                     raise RuntimeError(
                         f"`impute_multiple` failed at iteration {iter_idx + 1}/{max_iter}"
@@ -922,4 +929,4 @@ class BetaGausMixedDVAE(nn.Module):
         finally:
             self.train(was_training)
 
-        return temp_x_t.detach()
+        return temp_x_t if differentiable else temp_x_t.detach()
