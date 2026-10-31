@@ -238,10 +238,14 @@ def test_step3_imputation_is_detached_and_updates_type1_and_type2_cells():
         hidden_dim2=4,
         n_gmm_components=2,
     )
-    X0 = torch.tensor([[0.2, 0.5, 0.7], [0.4, 0.6, 0.9]])
+    X0 = torch.tensor(
+        [[0.2, 0.5, 0.7], [0.4, 0.6, 0.9]], device=model.device
+    )
     # Columns represent previously amputed (type 2), observed (type 0), and
     # source-missing (type 1) values, respectively.
-    source_mask = torch.tensor([[2, 0, 1], [2, 0, 1]], dtype=torch.int8)
+    source_mask = torch.tensor(
+        [[2, 0, 1], [2, 0, 1]], dtype=torch.int8, device=model.device
+    )
     feature_specs = (
         _scalar_spec("type2_value", "real_val"),
         _scalar_spec("observed_value", "real_val"),
@@ -275,9 +279,13 @@ def test_explicit_differentiable_imputation_keeps_type1_and_type2_gradients():
         hidden_dim2=4,
         n_gmm_components=2,
     )
-    X0 = torch.tensor([[0.2, 0.5, 0.7], [0.4, 0.6, 0.9]])
+    X0 = torch.tensor(
+        [[0.2, 0.5, 0.7], [0.4, 0.6, 0.9]], device=model.device
+    )
     # The first and third columns are type-2 and type-1; the middle is observed.
-    source_mask = torch.tensor([[2, 0, 1], [2, 0, 1]], dtype=torch.int8)
+    source_mask = torch.tensor(
+        [[2, 0, 1], [2, 0, 1]], dtype=torch.int8, device=model.device
+    )
     obs_mask = torch.where(source_mask == 0, 1, 0).to(dtype=torch.int8)
     update_mask = obs_mask == 0
 
