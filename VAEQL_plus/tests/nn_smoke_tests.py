@@ -318,13 +318,11 @@ def test_step3_imputation_accepts_binary_observation_mask() -> None:
     model = _build_Gumbel_Softmax_model(tau_start=0.5)
     obs_mask = torch.ones_like(x, dtype=torch.int8)
     obs_mask[:, :2] = 0
-    update_mask = obs_mask == 0
 
     imputed = model.impute_multiple(
         x,
         max_iter=2,
         obs_mask=obs_mask,
-        update_mask=update_mask,
         feat_type_dict=FEAT_TYPE_DICT,
     )
 

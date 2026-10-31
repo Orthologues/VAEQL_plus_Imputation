@@ -282,10 +282,8 @@ def generate_feature_aware_MI_aggregate(
     device = next(model.parameters()).device
     model_input = torch.as_tensor(X0, dtype=torch.float32, device=device)
     source_mask = torch.as_tensor(source_mask, dtype=torch.int8, device=device)
-    # Source states [0, 1, 2] become [1, 0, 0]: 1 observed, 0 missing.
-    obs_mask = torch.where(source_mask == 0, 1, 0).to(dtype=torch.int8)
-    # Step 3 updates both missing types; Step 2 instead selects only type-2 cells.
-    update_mask = obs_mask == 0
+    # Type-0 cells are observed; type-1/2 cells are missing in Step 3.
+    obs_mask = source_mask == 0
 
     def generate_draws() -> Iterable[torch.Tensor]:
         for _ in range(num_imputations):
@@ -295,7 +293,6 @@ def generate_feature_aware_MI_aggregate(
                 max_iter=imputation_cycles,
                 obs_mask=obs_mask,
                 feat_type_dict=feature_dict,
-                update_mask=update_mask,
                 differentiable=False,
             )
 
@@ -321,6 +318,7 @@ def _json_feature_dict(feature_dict: FeaturesTypeDict) -> Dict[str, Any]:
     return result
 
 
+#CHECKPOINT
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the selected GMM beta-VAE and prepare a Q-learning handoff."

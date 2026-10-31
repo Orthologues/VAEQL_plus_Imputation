@@ -166,17 +166,13 @@ def test_batch_handoff_returns_detached_soft_aggregate():
             self.next_draw = 0  # produces a different output on each imputation call
 
         def impute_multiple(
-            self, model_input, max_iter, obs_mask, feat_type_dict, update_mask, differentiable=False
+            self, model_input, max_iter, obs_mask, feat_type_dict, differentiable=False
         ):
             assert max_iter == 2  # handoff forwards the configured imputation-cycle count
             # The observed first column is 1; both source-missing and amputed cells are 0.
             torch.testing.assert_close(
                 obs_mask,
                 torch.tensor([[1, 0, 0, 0]], dtype=obs_mask.dtype, device=obs_mask.device),
-            )
-            torch.testing.assert_close(
-                update_mask,
-                torch.tensor([[False, True, True, True]], device=update_mask.device),
             )
             assert not differentiable  # Q-learning consumes values, not VAE gradients.
             offset = self.next_draw  # draw-specific offset, from 0 through 4
@@ -286,8 +282,7 @@ def test_explicit_differentiable_imputation_keeps_type1_and_type2_gradients():
     source_mask = torch.tensor(
         [[2, 0, 1], [2, 0, 1]], dtype=torch.int8, device=model.device
     )
-    obs_mask = torch.where(source_mask == 0, 1, 0).to(dtype=torch.int8)
-    update_mask = obs_mask == 0
+    obs_mask = source_mask == 0
 
     # The Step 3 handoff disables gradients, but the model API still supports
     # explicit differentiable imputation for callers that need it.
@@ -295,7 +290,6 @@ def test_explicit_differentiable_imputation_keeps_type1_and_type2_gradients():
         X0,
         max_iter=2,
         obs_mask=obs_mask,
-        update_mask=update_mask,
         feat_type_dict=None,
         differentiable=True,
     )

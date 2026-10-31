@@ -904,7 +904,6 @@ class BetaGausMixedDVAE(nn.Module):
         differentiable: bool = False,
         *,
         obs_mask: ArrayLike | None = None,
-        update_mask: ArrayLike | None = None,
     ) -> torch.Tensor:
         """
         Produce one iterative stochastic imputation sample.
@@ -915,13 +914,12 @@ class BetaGausMixedDVAE(nn.Module):
         - `X_mask`: legacy source-state mask used by Step 2 (`0` observed,
           `1` source-missing, `2` previously amputated); only type-2 cells update.
         - `obs_mask`: optional Step 3 binary mask (`1` observed, `0` missing).
-        - `update_mask`: optional Step 3 boolean selector; defaults to all missing cells.
 
         Behavior:
         - expects `X_incomplete` to be already pre-imputed (no NaN values allowed)
         - repeatedly run the model with a fixed mask and stochastic latent sampling
         - when `X_mask` is supplied, retain Step 2's type-2-only update behavior;
-          when `obs_mask` is supplied, update the selected missing cells
+          when `obs_mask` is supplied, update every cell in its boolean complement.
         - with `differentiable=True`, enable autograd and retain the graph for
           losses that should update this VAE; the default remains detached inference
 
@@ -943,18 +941,10 @@ class BetaGausMixedDVAE(nn.Module):
             raise ValueError("`X_incomplete` must be pre-imputed and contain no NaN values in `impute_multiple`.")
 
         if obs_mask is not None:
-            obs_mask_t = self._binary_observation_indicator(obs_mask, x_incomplete_t).to(dtype=torch.int8)
-            if update_mask is None:
-                update_mask_t = obs_mask_t == 0
-            else:
-                update_mask_t = torch.as_tensor(update_mask, device=device, dtype=torch.bool)
-                if update_mask_t.shape != x_incomplete_t.shape:
-                    raise ValueError(
-                        f"`update_mask` must have shape {tuple(x_incomplete_t.shape)}, "
-                        f"got {tuple(update_mask_t.shape)}"
-                    )
-                if bool((update_mask_t & (obs_mask_t != 0)).any().item()):
-                    raise ValueError("`update_mask` may select only cells marked missing in `obs_mask`.")
+            obs_mask_t = self._binary_observation_indicator(
+                obs_mask, x_incomplete_t
+            ).to(dtype=torch.bool)
+            missing_mask_t = ~obs_mask_t
             source_mask_t = None
         else:
             source_mask_t = (
@@ -968,7 +958,7 @@ class BetaGausMixedDVAE(nn.Module):
                     f"`X_mask` {tuple(source_mask_t.shape)}"
                 )
             BetaGausMixedDVAEUtils.mask_type2_indices(source_mask_t, tuple(x_incomplete_t.shape))
-            update_mask_t = source_mask_t == 2
+            missing_mask_t = source_mask_t == 2
         temp_x_t = x_incomplete_t.clone()
 
         was_training = self.training
@@ -982,7 +972,7 @@ class BetaGausMixedDVAE(nn.Module):
                         else:
                             output_t = self.forward(temp_x_t, source_mask_t)
                         recon = self.activate_reconstruction(output_t["recon_logits"], feat_type_dict)
-                        temp_x_t = torch.where(update_mask_t, recon, x_incomplete_t)
+                        temp_x_t = torch.where(missing_mask_t, recon, x_incomplete_t)
                 except Exception as exc:
                     raise RuntimeError(
                         f"`impute_multiple` failed at iteration {iter_idx + 1}/{max_iter}"
