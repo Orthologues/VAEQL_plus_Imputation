@@ -1,8 +1,9 @@
-"""Train the selected GMM beta-VAE and prepare a differentiable Q handoff.
+"""Train the selected GMM beta-VAE and prepare a Q-learning handoff.
 
 This prototype consumes the Step 1 preprocessing bundle and the selected
-beta/C pair from Step 2. The returned handoff creates graph-connected soft
-imputations per Q-learning batch; the Q-learning algorithm is implemented later.
+beta/C pair from Step 2. The returned handoff creates detached, feature-aware
+multiple-imputation aggregates per Q-learning batch; the Q-learning algorithm
+is implemented later.
 """
 
 from __future__ import annotations
@@ -90,11 +91,11 @@ def train_vae_and_prepare_q_handoff(
     num_imputations: int,
     imputation_cycles: int,
 ) -> Step3Handoff:
-    """Train the VAE and return a batch-lazy differentiable Q-learning handoff.
+    """Train the VAE and return a batch-lazy Q-learning handoff.
 
     Call ``handoff.impute_batch(row_indices)`` inside each Q-learning update.
-    The returned aggregate stays connected to the VAE for that update's backward
-    pass; later updates generate fresh graphs and stochastic imputations.
+    Each call returns a detached aggregate of fresh stochastic imputations; the
+    Q-learning update consumes its values without backpropagating through the VAE.
     """
     model, training_metrics = train_vae_on_full_dataset(
         X0=X0,
@@ -200,7 +201,7 @@ def train_vae_on_full_dataset(
 
 
 class Step3Handoff(NamedTuple):
-    """Trained VAE and inputs for batch-wise differentiable Q-learning."""
+    """Trained VAE and inputs for batch-wise Q-learning imputation."""
 
     model: BetaGausMixedDVAE
     X0: torch.Tensor
@@ -212,7 +213,7 @@ class Step3Handoff(NamedTuple):
     imputation_cycles: int
 
     def impute_batch(self, row_indices: np.ndarray | torch.Tensor) -> torch.Tensor:
-        """Create a fresh graph-connected imputation aggregate for selected rows."""
+        """Create a fresh detached imputation aggregate for selected rows."""
         rows = torch.as_tensor(row_indices, dtype=torch.long, device=self.X0.device).reshape(-1)
         return generate_feature_aware_MI_aggregate(
             model=self.model,
@@ -231,11 +232,11 @@ def _feature_aware_MI_aggregate(
     source_mask: torch.Tensor,
     feature_specs: Tuple[OrderedFeature, ...],
 ) -> torch.Tensor:
-    """Average soft imputation draws without breaking their autograd graphs.
+    """Average soft imputation draws feature-wise.
 
-    Elementwise averaging preserves binary probabilities, categorical simplex
-    vectors, and monotone ordinal cumulative probabilities. Only numeric features
-    are clipped; observed cells are copied from the Step 1 input.
+    Each draw's binary probabilities, categorical simplex vectors, and monotone
+    ordinal cumulative probabilities remain valid under arithmetic averaging.
+    Only numeric features are clipped; observed cells are copied from Step 1.
     """
     X0 = torch.as_tensor(X0, dtype=torch.float32)
     source_mask = torch.as_tensor(source_mask, device=X0.device)
@@ -275,7 +276,7 @@ def generate_feature_aware_MI_aggregate(
     num_imputations: int,
     imputation_cycles: int,
 ) -> torch.Tensor:
-    """Generate soft draws whose aggregate remains differentiable to the VAE."""
+    """Generate soft draws and return a detached feature-aware aggregate."""
     num_imputations = int(num_imputations)
     imputation_cycles = int(imputation_cycles)
     device = next(model.parameters()).device
@@ -286,19 +287,19 @@ def generate_feature_aware_MI_aggregate(
     # Step 3 updates both missing types; Step 2 instead selects only type-2 cells.
     update_mask = obs_mask == 0
 
-    # CHECKPOINT
     def generate_draws() -> Iterable[torch.Tensor]:
         for _ in range(num_imputations):
+            # Stream detached draws into the aggregate instead of storing a list.
             yield model.impute_multiple(
                 model_input,
                 max_iter=imputation_cycles,
                 obs_mask=obs_mask,
                 feat_type_dict=feature_dict,
                 update_mask=update_mask,
-                differentiable=True,
+                differentiable=False,
             )
 
-    with torch.enable_grad():
+    with torch.no_grad():
         return _feature_aware_MI_aggregate(
             generate_draws(), model_input, source_mask, feature_specs
         )
@@ -322,7 +323,7 @@ def _json_feature_dict(feature_dict: FeaturesTypeDict) -> Dict[str, Any]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the selected GMM beta-VAE and prepare a differentiable Q handoff."
+        description="Train the selected GMM beta-VAE and prepare a Q-learning handoff."
     )
     parser.add_argument("--preprocessed-dir", type=Path, required=True)
     parser.add_argument("--beta-summary", type=Path, required=True)
@@ -412,12 +413,12 @@ def main() -> None:
     with open(config_path, "w", encoding="utf-8") as file:
         json.dump(run_config, file, indent=2, allow_nan=False)
 
-    # The standalone CLI writes model and metadata snapshots. For differentiable
-    # Q-learning, call `train_vae_and_prepare_q_handoff` and impute each batch in-process.
+    # The standalone CLI writes model and metadata snapshots. For Q-learning,
+    # call `train_vae_and_prepare_q_handoff` and impute each batch in-process.
     print(json.dumps({
         "model_checkpoint": str(model_path),
         "source_missingness_mask": str(source_mask_path),
-        "differentiable_handoff": "Step3Handoff.impute_batch(row_indices)",
+        "q_learning_handoff": "Step3Handoff.impute_batch(row_indices)",
         "mean_target_cells_per_row": float(
             np.mean(np.count_nonzero(inputs.source_mask != 0, axis=1))
         ),
