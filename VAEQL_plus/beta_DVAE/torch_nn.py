@@ -718,8 +718,9 @@ class BetaGausMixedDVAE(nn.Module):
                 continue
             abs_err_raw = torch.abs(recon_logits[:, idx] - x_obs_processed_t[:, idx])
             sqr_err_raw = abs_err_raw.pow(2)
-            # Statistical coefficient under standardized Gaussian assumption:
-            # larger |z| gets smaller weight via exp(-0.5 * z^2).
+            # Keep the Gaussian z-score weight for the VAE reconstruction
+            # baseline; Step 3's numeric holdout reward uses its configured
+            # absolute-exponential discount separately.
             # References:
             #   1. Bishop, Pattern Recognition and Machine Learning (2006), Gaussian density form.
             #   2. Murphy, Machine Learning: A Probabilistic Perspective (2012), Normal distribution and quadratic exponent.
