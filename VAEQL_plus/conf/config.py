@@ -33,22 +33,22 @@ MIN_CONVERGENCE_TOLERANCE = 1e-4
 DEFAULT_CONVERGENCE_TOLERANCE = float(
     CV_BETA_C_TUNING_PARAMS["convergence_tolerance"]
 )
-DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA = float(
-    DIS_BETAVAE_TRAIN_VAL_PARAMS.get("ql_numeric_discount_lambda", 0.5)
+DEFAULT_NUMERIC_DISCOUNT_LAMBDA = float(
+    DIS_BETAVAE_TRAIN_VAL_PARAMS.get("numeric_discount_lambda", 0.5)
 )
 
 
-def validate_ql_numeric_discount_lambda(value: Any) -> float:
-    """Return a valid numeric-target discount rate for the Step 3 reward."""
+def validate_numeric_discount_lambda(value: Any) -> float:
+    """Return a valid shared numeric-target discount rate."""
     try:
         discount_lambda = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            "ql_numeric_discount_lambda must satisfy 0 < value <= 0.5."
+            "numeric_discount_lambda must satisfy 0 < value <= 0.5."
         ) from exc
     if not math.isfinite(discount_lambda) or not 0.0 < discount_lambda <= 0.5:
         raise ValueError(
-            "ql_numeric_discount_lambda must satisfy 0 < value <= 0.5; "
+            "numeric_discount_lambda must satisfy 0 < value <= 0.5; "
             f"got {value!r}."
         )
     return discount_lambda
@@ -316,7 +316,7 @@ class VaeQlConfig(TypedDict):
     num_of_q_agents: int # number of Q-learning agents to train in parallel (with shared experience replay buffer)
     vaeql_cycles: int # number of "Ensemble Cycles of Q-agent-reinforced VAE models" to run; each cycle consists of training num_of_q_agents in parallel with shared experience replay, then retraining the VAEs on the public replay buffer (experience), then ensemble of the VAEs into one "consensus model" for the next cycle
     replay_buffer_size: int # maximum size of the experience replay buffer (must be >= ql_max_time_steps * num_of_q_agents to allow for at least one full episode per agent in the buffer)
-    ql_numeric_discount_lambda: float  # absolute-exponential numeric holdout discount; default 0.5
+    numeric_discount_lambda: float  # shared absolute-exponential numeric discount; default 0.5
     device: Any = _resolve_device()
 
 
@@ -399,10 +399,10 @@ class VaeQlConfig(TypedDict):
         ql_max_time_steps = union_dict.get("ql_max_time_steps")
         num_of_q_agents = union_dict.get("num_of_q_agents")
         replay_buffer_size = union_dict.get("replay_buffer_size")
-        ql_numeric_discount_lambda = validate_ql_numeric_discount_lambda(
+        numeric_discount_lambda = validate_numeric_discount_lambda(
             union_dict.get(
-                "ql_numeric_discount_lambda",
-                DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA,
+                "numeric_discount_lambda",
+                DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
             )
         )
         
@@ -475,7 +475,7 @@ class VaeQlConfig(TypedDict):
             ql_max_time_steps=ql_max_time_steps,
             num_of_q_agents=num_of_q_agents,
             replay_buffer_size=replay_buffer_size,
-            ql_numeric_discount_lambda=ql_numeric_discount_lambda,
+            numeric_discount_lambda=numeric_discount_lambda,
             input_dim=input_dim
         )
 

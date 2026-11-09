@@ -19,6 +19,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
+from VAEQL_plus.conf.config import (
+    DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
+    validate_numeric_discount_lambda,
+)
 from .utils import BetaGausMixedDVAEUtils, ArrayLike
 
 class BetaGausMixedDVAE(nn.Module):
@@ -80,6 +84,7 @@ class BetaGausMixedDVAE(nn.Module):
         anneal_rate: float = 0.01,
         num_feat_loss_metric: str = "RMSE",
         device: str | torch.device | None = None,
+        numeric_discount_lambda: float = DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
     ):
         super().__init__()
         if not (1 < int(n_gmm_components) < 100):
@@ -106,6 +111,9 @@ class BetaGausMixedDVAE(nn.Module):
         self.anneal_rate = float(anneal_rate)
         self.gumbel_softmax_tau = float(tau_start)
         self.num_feat_loss_metric = self._normalize_num_feat_loss_metric(num_feat_loss_metric)
+        self.numeric_discount_lambda = validate_numeric_discount_lambda(
+            numeric_discount_lambda
+        )
         self.batch_size = batch_size
 
         # Condition the encoder on the observed indicator alongside the filled values.
@@ -718,15 +726,13 @@ class BetaGausMixedDVAE(nn.Module):
                 continue
             abs_err_raw = torch.abs(recon_logits[:, idx] - x_obs_processed_t[:, idx])
             sqr_err_raw = abs_err_raw.pow(2)
-            # Keep the Gaussian z-score weight for the VAE reconstruction
-            # baseline; Step 3's numeric holdout reward uses its configured
-            # absolute-exponential discount separately.
-            # References:
-            #   1. Bishop, Pattern Recognition and Machine Learning (2006), Gaussian density form.
-            #   2. Murphy, Machine Learning: A Probabilistic Perspective (2012), Normal distribution and quadratic exponent.
-            z_score_disc_coef = torch.exp(-0.5 * x_obs_processed_t[:, idx].pow(2))
-            mse_vals = (sqr_err_raw * z_score_disc_coef)[type0_mask]
-            mae_vals = (abs_err_raw * z_score_disc_coef)[type0_mask]
+            # Use the same absolute-exponential target discount as the Step 3
+            # numeric holdout loss: exp(-lambda_num * |target|).
+            numeric_discount = torch.exp(
+                -self.numeric_discount_lambda * x_obs_processed_t[:, idx].abs()
+            )
+            mse_vals = (sqr_err_raw * numeric_discount)[type0_mask]
+            mae_vals = (abs_err_raw * numeric_discount)[type0_mask]
             weighted_mse = mse_vals.mean()
             weighted_mae = mae_vals.mean()
             loss_terms.append(

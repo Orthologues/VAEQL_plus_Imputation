@@ -20,9 +20,9 @@ import torch
 from VAEQL_plus.beta_DVAE.torch_nn import BetaGausMixedDVAE
 from VAEQL_plus.conf.config import (
     CV_BETA_C_TUNING_PARAMS_PATH,
-    DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA,
+    DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
     DIS_BETAVAE_TRAIN_VAL_PARAMS_PATH,
-    validate_ql_numeric_discount_lambda,
+    validate_numeric_discount_lambda,
 )
 from VAEQL_plus.conf.feat_types import FeaturesTypeDict
 from VAEQL_plus.step1_preprocessing.feat_preprocessor import OrderedFeature
@@ -40,7 +40,7 @@ class Step3Inputs(NamedTuple):
 def weakly_discounted_numeric_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
-    lambda_num: float = DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA,
+    lambda_num: float = DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
 ) -> torch.Tensor:
     """Return elementwise numeric holdout losses for observed targets.
 
@@ -48,7 +48,7 @@ def weakly_discounted_numeric_loss(
     source-missing values are never used as scoring targets. The returned terms
     are exp(-lambda_num * abs(target)) * abs(prediction - target) / 10.
     """
-    lambda_num = validate_ql_numeric_discount_lambda(lambda_num)
+    lambda_num = validate_numeric_discount_lambda(lambda_num)
     prediction = torch.as_tensor(prediction)
     if not torch.is_floating_point(prediction):
         prediction = prediction.to(dtype=torch.float32)
@@ -127,12 +127,6 @@ def train_vae_and_prepare_q_handoff(
     Each call returns a detached aggregate of fresh stochastic imputations; the
     Q-learning update consumes its values without backpropagating through the VAE.
     """
-    numeric_discount_lambda = validate_ql_numeric_discount_lambda(
-        train_config.get(
-            "ql_numeric_discount_lambda",
-            DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA,
-        )
-    )
     model, training_metrics = train_vae_on_full_dataset(
         X0=X0,
         source_mask=source_mask,
@@ -151,7 +145,7 @@ def train_vae_and_prepare_q_handoff(
         training_metrics=training_metrics,
         num_imputations=num_imputations,
         imputation_cycles=imputation_cycles,
-        numeric_discount_lambda=numeric_discount_lambda,
+        numeric_discount_lambda=model.numeric_discount_lambda,
     )
 
 
@@ -174,6 +168,12 @@ def train_vae_on_full_dataset(
         "hidden_dim2": int(train_config["hidden_size_2"]),
         "n_gmm_components": int(train_config["n_gmm_components"]),
         "num_feat_loss_metric": str(train_config["num_feat_loss_metric"]),
+        "numeric_discount_lambda": validate_numeric_discount_lambda(
+            train_config.get(
+                "numeric_discount_lambda",
+                DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
+            )
+        ),
     }
     learning_rate = float(train_config["vae_alpha"])
     batch_size = int(train_config["vae_batch_size"])
@@ -203,6 +203,7 @@ def train_vae_on_full_dataset(
         n_gmm_components=model_config["n_gmm_components"],
         batch_size=batch_size,
         num_feat_loss_metric=model_config["num_feat_loss_metric"],
+        numeric_discount_lambda=model_config["numeric_discount_lambda"],
     ).to(device)
     optimizer = (
         torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -248,7 +249,7 @@ class Step3Handoff(NamedTuple):
     training_metrics: Dict[str, float]
     num_imputations: int
     imputation_cycles: int
-    numeric_discount_lambda: float = DEFAULT_QL_NUMERIC_DISCOUNT_LAMBDA
+    numeric_discount_lambda: float = DEFAULT_NUMERIC_DISCOUNT_LAMBDA
 
     def numeric_holdout_loss(
         self,

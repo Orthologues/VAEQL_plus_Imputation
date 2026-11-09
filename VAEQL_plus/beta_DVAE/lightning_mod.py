@@ -39,6 +39,7 @@ from typing_extensions import override
 
 from VAEQL_plus.conf.config import (
     DEFAULT_CONVERGENCE_TOLERANCE,
+    DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
     DisentangledBetaVaeTuningConfig,
     _validate_convergence_tolerance,
     _validate_k_folds,
@@ -970,6 +971,9 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
                 hidden_dim2=hidden_dim2,
                 n_gmm_components=n_gmm_components,
                 num_feat_loss_metric=num_feat_loss_metric,
+                numeric_discount_lambda=config.get(
+                    "numeric_discount_lambda", DEFAULT_NUMERIC_DISCOUNT_LAMBDA
+                ),
             ).to(device)
             optimizer = (
                 torch.optim.Adam(model.parameters(), lr=lr)

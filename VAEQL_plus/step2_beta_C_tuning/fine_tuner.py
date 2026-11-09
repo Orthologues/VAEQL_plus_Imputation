@@ -28,6 +28,7 @@ from VAEQL_plus.beta_DVAE.utils import BetaGausMixedDVAEUtils
 from VAEQL_plus.conf.config import (
     CV_BETA_C_TUNING_PARAMS,
     DEFAULT_CONVERGENCE_TOLERANCE,
+    DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
     DisentangledBetaVaeTuningConfig,
     _validate_convergence_tolerance,
     _validate_granularity,
@@ -208,6 +209,9 @@ def _new_model(input_dim: int, config: Dict[str, Any], device: torch.device) -> 
         hidden_dim2=int(config["hidden_size_2"]),
         n_gmm_components=int(config["n_gmm_components"]),
         num_feat_loss_metric=str(config["num_feat_loss_metric"]),
+        numeric_discount_lambda=float(
+            config.get("numeric_discount_lambda", DEFAULT_NUMERIC_DISCOUNT_LAMBDA)
+        ),
     ).to(device)
 
 
@@ -553,6 +557,7 @@ def load_and_patch_cv_config(
         "hidden_size_1": train_val_defaults["hidden_size_1"],
         "hidden_size_2": train_val_defaults["hidden_size_2"],
         "num_feat_loss_metric": train_val_defaults["num_feat_loss_metric"],
+        "numeric_discount_lambda": train_val_defaults["numeric_discount_lambda"],
         **config,
     }
     config["results_path"] = str(results_path)
