@@ -941,7 +941,7 @@ class BetaGausMixedDVAETrainer(torch_lit.LightningModule):
             config.get("convergence_tolerance", DEFAULT_CONVERGENCE_TOLERANCE)
         )
         max_non_improved_rounds = config.get("convergence_patience", 10)
-        num_feat_loss_metric = config.get("num_feat_loss_metric", "RMSE")
+        num_feat_loss_metric = config.get("num_feat_loss_metric", "MAE")
         start_epoch, max_epoch, epochs_between_evals = (int(v) for v in config["halving_epoch_budgets"])
         fold_scores: Dict[str, Tuple[float]] = {}
         results_path = config.get("results_path", "beta_analysis.csv")

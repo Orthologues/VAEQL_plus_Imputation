@@ -82,7 +82,7 @@ class BetaGausMixedDVAE(nn.Module):
         tau_start: float = 0.5, # inferred from the preliminary SMOKE test
         tau_end: float = 0.25,
         anneal_rate: float = 0.01,
-        num_feat_loss_metric: str = "RMSE",
+        num_feat_loss_metric: str = "MAE",
         device: str | torch.device | None = None,
         numeric_discount_lambda: float = DEFAULT_NUMERIC_DISCOUNT_LAMBDA,
     ):

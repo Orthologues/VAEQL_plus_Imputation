@@ -2,7 +2,7 @@
   "n_gmm_components": 10,
   "hidden_size_1": 64,
   "hidden_size_2": 32,
-  "num_feat_loss_metric": "RMSE",
+  "num_feat_loss_metric": "MAE",
   "vae_cont_lat_dim": 10,
   "vae_alpha": 0.001,
   "vae_batch_size": 128,

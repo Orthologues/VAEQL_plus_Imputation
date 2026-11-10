@@ -490,7 +490,7 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
     # 6 numeric columns, 2 ordinal groups, 2 binary columns, 2 categorical groups.
     # Zero binary logits give BCE=log(2), cat_a CE=log(3), cat_b CE=log(4),
     # ordinal raw outputs are converted through positive softplus gaps, and
-    # numeric features use the same absolute-exponential RMSE rule as the model.
+    # Numeric features use the default absolute-exponential MAE rule.
     numeric_expected_terms = []
     for col_idx in range(6):
         target_col = x[:, col_idx]
@@ -498,7 +498,7 @@ def test_reconstruction_loss_counts_encoded_groups_once() -> None:
             -model.numeric_discount_lambda * target_col.abs()
         )
         numeric_expected_terms.append(
-            torch.sqrt((target_col.pow(2) * numeric_discount).mean() + 1e-12)
+            (target_col.abs() * numeric_discount).mean()
         )
     ordinal_expected_terms = []
     name_to_index = {
