@@ -310,6 +310,7 @@ class VaeQlConfig(TypedDict):
     ql_epsilon_decay: float # multiplicative decay factor applied each step/episode
     ql_episodes_per_cycle: int # number of episodes for the Q-learning training per "Ensemble Cycle of Q-agent-reinforced VAE models" 
     ql_max_time_steps: int # maximum number of time steps per episode for the Q-learning training
+    ql_vae_replay_interval: int # completed Q episodes between VAE replay updates
     ## reward calculation
     ql_local_reward_eta: float # reward coefficient for the local imputation quality (e.g., negative delta of MAE of the same patient compared to the initial imputation for the current state)
     # Shared configs
@@ -397,6 +398,7 @@ class VaeQlConfig(TypedDict):
         ql_epsilon_decay = union_dict.get("ql_epsilon_decay")
         ql_max_episodes = union_dict.get("ql_max_episodes")
         ql_max_time_steps = union_dict.get("ql_max_time_steps")
+        ql_vae_replay_interval = union_dict.get("ql_vae_replay_interval")
         num_of_q_agents = union_dict.get("num_of_q_agents")
         replay_buffer_size = union_dict.get("replay_buffer_size")
         numeric_discount_lambda = validate_numeric_discount_lambda(
@@ -433,6 +435,7 @@ class VaeQlConfig(TypedDict):
             ("vae_max_epochs", vae_max_epochs),
             ("ql_max_episodes", ql_max_episodes),
             ("ql_max_time_steps", ql_max_time_steps),
+            ("ql_vae_replay_interval", ql_vae_replay_interval),
             ("num_of_q_agents", num_of_q_agents),
         ]:
             cls._gt_zero(n, v)
@@ -473,6 +476,7 @@ class VaeQlConfig(TypedDict):
             ql_epsilon_decay=ql_epsilon_decay,
             ql_max_episodes=ql_max_episodes,
             ql_max_time_steps=ql_max_time_steps,
+            ql_vae_replay_interval=ql_vae_replay_interval,
             num_of_q_agents=num_of_q_agents,
             replay_buffer_size=replay_buffer_size,
             numeric_discount_lambda=numeric_discount_lambda,
